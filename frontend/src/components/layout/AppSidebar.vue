@@ -1,11 +1,15 @@
 <script setup lang="ts">
-import { ref, watch } from 'vue'
+import { ref, watch, computed } from 'vue'
 import dayjs from 'dayjs'
 import Icon from '@/components/Icon.vue'
 import NoteTree from '@/components/NoteTree.vue'
 import { useNoteStore } from '@/stores/note'
 import { useAuthStore } from '@/stores/auth'
 import { useTheme } from '@/composables/useTheme'
+import { useChatStore } from '@/stores/chat'
+import { deleteChatSession } from '@/api/ai'
+import { useToast } from '@/composables/useToast'
+import { extractErrorMessage } from '@/api/client'
 import type { SnowflakeId } from '@/types'
 
 const props = defineProps<{
@@ -33,6 +37,31 @@ const emit = defineEmits<{
 const noteStore = useNoteStore()
 const authStore = useAuthStore()
 const { theme, toggle } = useTheme()
+const chatStore = useChatStore()
+const toast = useToast()
+
+const chatSessions = computed(() => chatStore.sessions)
+
+function selectChatSession(id: SnowflakeId) {
+  chatStore.setCurrentSession(id)
+  emit('select-chat')
+}
+
+function startNewChat() {
+  chatStore.startNewChat()
+  emit('select-chat')
+}
+
+async function removeChatSession(id: SnowflakeId) {
+  if (!window.confirm('删除该会话？')) return
+  try {
+    await deleteChatSession(id)
+    chatStore.removeSession(id)
+    toast.success('已删除')
+  } catch (err) {
+    toast.error(extractErrorMessage(err, '删除失败'))
+  }
+}
 
 // Debounced search input — drives the combined tree filter in AppView.
 const localKeyword = ref(props.keyword)
@@ -69,18 +98,24 @@ const uncategorized = () => noteStore.tree?.uncategorized ?? []
 
     <!-- Actions -->
     <div class="sidebar-actions">
-      <button class="btn btn-primary" @click="emit('new-note')">
+      <button v-if="activeView === 'chat'" class="btn btn-primary btn-new-chat" @click="startNewChat">
         <Icon name="plus" :size="14" :stroke-width="2.2" />
-        新建笔记
+        新对话
       </button>
-      <button class="btn btn-ghost" @click="emit('new-category')">
-        <Icon name="folder-plus" :size="14" :stroke-width="2.2" />
-        分类
-      </button>
+      <template v-else>
+        <button class="btn btn-primary" @click="emit('new-note')">
+          <Icon name="plus" :size="14" :stroke-width="2.2" />
+          新建笔记
+        </button>
+        <button class="btn btn-ghost" @click="emit('new-category')">
+          <Icon name="folder-plus" :size="14" :stroke-width="2.2" />
+          分类
+        </button>
+      </template>
     </div>
 
-    <!-- Search -->
-    <div class="sidebar-search">
+    <!-- Search (hidden in chat mode) -->
+    <div v-if="activeView !== 'chat'" class="sidebar-search">
       <Icon name="search" :size="14" class="search-icon" />
       <input
         v-model="localKeyword"
@@ -90,8 +125,26 @@ const uncategorized = () => noteStore.tree?.uncategorized ?? []
       />
     </div>
 
-    <!-- Combined category + note tree -->
-    <div class="sidebar-content">
+    <!-- Chat mode: history session list -->
+    <div v-if="activeView === 'chat'" class="sidebar-content">
+      <div v-if="!chatSessions.length" class="empty-hint">暂无历史会话</div>
+      <div
+        v-for="s in chatSessions"
+        :key="s.session_id"
+        class="session-item"
+        :class="{ active: chatStore.currentSessionId === s.session_id }"
+        @click="selectChatSession(s.session_id)"
+      >
+        <Icon name="chat" :size="14" class="session-icon" />
+        <span class="session-label">{{ s.session_title || '新对话' }}</span>
+        <button class="session-del" title="删除" @click.stop="removeChatSession(s.session_id)">
+          <Icon name="trash" :size="13" />
+        </button>
+      </div>
+    </div>
+
+    <!-- Notes mode: combined category + note tree -->
+    <div v-else class="sidebar-content">
       <div v-if="noteStore.treeLoading && !noteStore.tree" class="loading-hint">
         加载中…
       </div>
@@ -136,8 +189,10 @@ const uncategorized = () => noteStore.tree?.uncategorized ?? []
           </div>
         </div>
       </template>
+    </div>
 
-      <!-- Virtual "AI 对话" entry -->
+    <!-- AI navigation (always visible) -->
+    <div class="sidebar-ai-nav">
       <div class="tree-section-title ai-title">
         <span>AI 助手</span>
       </div>
@@ -215,6 +270,9 @@ const uncategorized = () => noteStore.tree?.uncategorized ?? []
   gap: 8px;
   padding: 12px 16px 8px;
 }
+.btn-new-chat {
+  flex: 1;
+}
 .sidebar-search {
   position: relative;
   padding: 0 16px 8px;
@@ -247,13 +305,68 @@ const uncategorized = () => noteStore.tree?.uncategorized ?? []
   padding: 12px 6px 6px;
 }
 .ai-title {
-  margin-top: 8px;
+  margin-top: 0;
 }
 .loading-hint,
 .empty-hint {
   font-size: 12px;
   color: var(--text-tertiary);
   padding: 8px 10px;
+}
+
+/* Chat history session rows */
+.session-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  color: var(--text-secondary);
+  transition: background 0.15s, color 0.15s;
+}
+.session-item:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+.session-item.active {
+  background: var(--bg-active);
+  color: var(--text-accent);
+}
+.session-icon {
+  flex-shrink: 0;
+  opacity: 0.6;
+}
+.session-label {
+  flex: 1;
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.session-del {
+  opacity: 0;
+  width: 20px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  color: var(--text-tertiary);
+  flex-shrink: 0;
+}
+.session-item:hover .session-del {
+  opacity: 1;
+}
+.session-del:hover {
+  background: var(--bg-input);
+  color: #dc2626;
+}
+
+/* AI navigation block (always visible, sits between content and footer) */
+.sidebar-ai-nav {
+  padding: 0 10px 4px;
+  border-top: 1px solid var(--border);
 }
 
 /* Uncategorized group reuses the tree row styling. */

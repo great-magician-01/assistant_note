@@ -201,3 +201,51 @@ a {
   white-space: nowrap;
   border-width: 0;
 }
+
+/* ─── Vditor dark mode text contrast ─── */
+/* Vditor's built-in dark theme only overrides CSS variables (--textarea-text-color
+   etc.) but never sets `color` on .vditor itself — so the editor text inherits
+   `body { color: var(--text-secondary) }` which is #94a3b8 (dim gray) in dark mode.
+   Vditor's dark content-theme CSS (loaded dynamically for preview) also doesn't
+   cover all elements. Fix both edit and preview text to use the light primary. */
+[data-theme="dark"] .vditor {
+  color: var(--text-primary);
+}
+/* IR editing area — Vditor's instant-render mode. */
+[data-theme="dark"] .vditor-ir {
+  color: var(--text-primary);
+}
+/* .vditor-reset is the content container used in both edit (code blocks) and
+   preview (the entire rendered body). Vditor's base CSS hardcodes #24292e (dark
+   gray) and the dynamic dark content-theme sets #d1d5da — override both. */
+[data-theme="dark"] .vditor-reset {
+  color: var(--text-primary);
+}
+/* Blockquotes use hardcoded #6a737d (light) / #b9b9b9 (dark) — too dim. */
+[data-theme="dark"] .vditor-reset blockquote {
+  color: var(--text-secondary);
+  border-left-color: var(--border);
+}
+/* Horizontal rules in dark mode. */
+[data-theme="dark"] .vditor-reset hr {
+  background-color: var(--border);
+}
+/* Inline code background — the dark content-theme uses a blue-ish bg that feels
+   out of place. Replace with the app's code background token. */
+[data-theme="dark"] .vditor-reset code:not(.hljs):not(.highlight-chroma) {
+  background-color: var(--bg-code);
+  color: var(--text-accent);
+}
+/* Tables — Vditor's base CSS hardcodes light borders (#c6cbd1 / #dfe2e5) and
+   pale row backgrounds; the dark content-theme only overrides a subset. */
+[data-theme="dark"] .vditor-reset table tr {
+  background-color: var(--bg-card);
+  border-top-color: var(--border);
+}
+[data-theme="dark"] .vditor-reset table td,
+[data-theme="dark"] .vditor-reset table th {
+  border-color: var(--border);
+}
+[data-theme="dark"] .vditor-reset table tbody tr:nth-child(2n) {
+  background-color: var(--bg-input);
+}

@@ -303,25 +303,18 @@ function onKeydown(e: KeyboardEvent) {
 
 <style scoped>
 .note-ai-drawer {
-  position: absolute;
-  top: 0;
-  right: 0;
-  bottom: 0;
-  width: 420px;
-  max-width: 90%;
+  width: 0;
+  overflow: hidden;
   background: var(--bg-main);
-  border-left: 1px solid var(--border);
-  box-shadow: -8px 0 24px rgba(0, 0, 0, 0.08);
+  border-left: 1px solid transparent;
   display: flex;
   flex-direction: column;
-  z-index: 30;
-  transform: translateX(100%);
-  transition: transform 0.25s ease;
-  pointer-events: none;
+  flex-shrink: 0;
+  transition: width 0.25s ease, border-color 0.25s ease;
 }
 .note-ai-drawer.open {
-  transform: translateX(0);
-  pointer-events: auto;
+  width: 420px;
+  border-left-color: var(--border);
 }
 .drawer-header {
   display: flex;

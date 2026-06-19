@@ -62,6 +62,10 @@ function vditorTheme(): 'dark' | 'classic' {
   return theme.value === 'dark' ? 'dark' : 'classic'
 }
 
+function hljsStyle(): string {
+  return theme.value === 'dark' ? 'github-dark' : 'github'
+}
+
 // Vditor toolbar: curated set.
 const VDITOR_TOOLBAR: string[] = [
   'emoji', 'headings', 'bold', 'italic', 'strike', '|',
@@ -102,7 +106,7 @@ function buildVditorOptions(initialValue: string): ConstructorParameters<typeof 
     toolbar: VDITOR_TOOLBAR,
     toolbarConfig: { pin: true },
     preview: {
-      hljs: { lineNumber: true, style: 'github' },
+      hljs: { lineNumber: true, style: hljsStyle() },
     },
     upload: {
       // Custom upload handler — bypasses Vditor's own XHR so we use the app's
@@ -172,7 +176,7 @@ async function renderPreview() {
     cdn: `${import.meta.env.BASE_URL}vditor`,
     lang: 'zh_CN',
     icon: 'ant',
-    hljs: { lineNumber: true, style: 'github' },
+    hljs: { lineNumber: true, style: hljsStyle() },
     anchor: 0,
   })
 }
@@ -451,90 +455,94 @@ onBeforeUnmount(() => {
         </div>
       </div>
 
-      <!-- Read-only preview (default when opening a note) -->
-      <div v-show="mode === 'preview'" class="editor-body preview-body">
-        <h1 class="preview-title">{{ title || '无标题' }}</h1>
+      <div class="editor-workspace">
+        <!-- Read-only preview (default when opening a note) -->
+        <div v-show="mode === 'preview'" class="editor-body preview-body">
+          <h1 class="preview-title">{{ title || '无标题' }}</h1>
 
-        <div class="editor-meta-bar">
-          <span class="editor-meta-item">
-            <Icon name="calendar" :size="13" />
-            {{ updatedLabel }}
-          </span>
-          <span class="editor-meta-item">
-            <Icon name="folder" :size="13" />
-            {{ categoryName }}
-          </span>
-          <span class="editor-meta-item">
-            <Icon name="file-text" :size="13" />
-            {{ wordCount }} 字
-          </span>
-        </div>
+          <div class="editor-meta-bar">
+            <span class="editor-meta-item">
+              <Icon name="calendar" :size="13" />
+              {{ updatedLabel }}
+            </span>
+            <span class="editor-meta-item">
+              <Icon name="folder" :size="13" />
+              {{ categoryName }}
+            </span>
+            <span class="editor-meta-item">
+              <Icon name="file-text" :size="13" />
+              {{ wordCount }} 字
+            </span>
+          </div>
 
-        <div v-if="(note.note_tags ?? []).length" class="tags-row preview-tags">
-          <Icon name="tag" :size="14" class="tags-icon" />
-          <span v-for="t in note.note_tags ?? []" :key="t" class="tag-chip">{{ t }}</span>
-        </div>
+          <div v-if="(note.note_tags ?? []).length" class="tags-row preview-tags">
+            <Icon name="tag" :size="14" class="tags-icon" />
+            <span v-for="t in note.note_tags ?? []" :key="t" class="tag-chip">{{ t }}</span>
+          </div>
 
-        <div class="preview-content-wrap">
-          <div ref="previewRef" class="preview-content" />
-          <div v-if="!content" class="preview-empty">
-            <Icon name="file-text" :size="36" />
-            <p>这篇笔记还是空的，点击「编辑」开始写作</p>
+          <div class="preview-content-wrap">
+            <div ref="previewRef" class="preview-content" />
+            <div v-if="!content" class="preview-empty">
+              <Icon name="file-text" :size="36" />
+              <p>这篇笔记还是空的，点击「编辑」开始写作</p>
+            </div>
           </div>
         </div>
-      </div>
 
-      <!-- Edit mode (Vditor) -->
-      <div v-show="mode === 'edit'" class="editor-body">
-        <input
-          v-model="title"
-          class="editor-title-input"
-          placeholder="笔记标题"
-          @input="scheduleSave"
-        />
-
-        <div class="editor-meta-bar">
-          <span class="editor-meta-item">
-            <Icon name="calendar" :size="13" />
-            {{ updatedLabel }}
-          </span>
-          <span class="editor-meta-item">
-            <Icon name="folder" :size="13" />
-            {{ categoryName }}
-          </span>
-          <span class="editor-meta-item">
-            <Icon name="file-text" :size="13" />
-            {{ wordCount }} 字
-          </span>
-        </div>
-
-        <div class="tags-row">
-          <Icon name="tag" :size="14" class="tags-icon" />
+        <!-- Edit mode (Vditor) -->
+        <div v-show="mode === 'edit'" class="editor-body">
           <input
-            v-model="tagsStr"
-            class="tags-input"
-            placeholder="标签，用逗号分隔"
+            v-model="title"
+            class="editor-title-input"
+            placeholder="笔记标题"
             @input="scheduleSave"
           />
+
+          <div class="editor-meta-bar">
+            <span class="editor-meta-item">
+              <Icon name="calendar" :size="13" />
+              {{ updatedLabel }}
+            </span>
+            <span class="editor-meta-item">
+              <Icon name="folder" :size="13" />
+              {{ categoryName }}
+            </span>
+            <span class="editor-meta-item">
+              <Icon name="file-text" :size="13" />
+              {{ wordCount }} 字
+            </span>
+          </div>
+
+          <div class="tags-row">
+            <Icon name="tag" :size="14" class="tags-icon" />
+            <input
+              v-model="tagsStr"
+              class="tags-input"
+              placeholder="标签，用逗号分隔"
+              @input="scheduleSave"
+            />
+          </div>
+
+          <div class="vditor-wrap">
+            <div ref="vditorRef" class="vditor-host" />
+            <div v-if="!vditorReady" class="vditor-loading">编辑器加载中…</div>
+          </div>
         </div>
 
-        <div class="vditor-wrap">
-          <div ref="vditorRef" class="vditor-host" />
-          <div v-if="!vditorReady" class="vditor-loading">编辑器加载中…</div>
-        </div>
+        <NoteAiDrawer
+          v-model:visible="aiVisible"
+          :note-id="note.note_id"
+          :note-title="title || note.note_title || '无标题'"
+          @note-changed="onAiNoteChanged"
+        />
       </div>
 
       <NoteHistoryDrawer
         v-model:visible="historyVisible"
         :note-id="note.note_id"
+        :current-content="note.note_content"
+        :current-title="note.note_title"
         @rolled-back="onRolledBack"
-      />
-
-      <NoteAiDrawer
-        v-model:visible="aiVisible"
-        :note-id="note.note_id"
-        :note-title="title || note.note_title || '无标题'"
-        @note-changed="onAiNoteChanged"
       />
     </template>
   </div>
@@ -548,7 +556,13 @@ onBeforeUnmount(() => {
   flex-direction: column;
   min-width: 0;
   min-height: 0;
-  position: relative;
+}
+.editor-workspace {
+  flex: 1;
+  display: flex;
+  flex-direction: row;
+  min-height: 0;
+  overflow: hidden;
 }
 .empty-state {
   flex: 1;
@@ -685,6 +699,14 @@ onBeforeUnmount(() => {
   border: 1px solid var(--border);
   height: 100%;
 }
+/* Vditor's dark theme CSS applies its own text colors for the editor area,
+   but some content falls through to inherited colors — ensure base readability. */
+[data-theme="dark"] .vditor-host :deep(.vditor) {
+  color-scheme: dark;
+}
+[data-theme="dark"] .vditor-host :deep(.vditor-ir) {
+  color: var(--text-primary);
+}
 .vditor-loading {
   position: absolute;
   inset: 0;
@@ -752,6 +774,11 @@ onBeforeUnmount(() => {
 }
 .preview-content :deep(.vditor-preview) {
   background: transparent;
+}
+/* Ensure readable text contrast in dark mode — Vditor's content theme
+   (mode: 'dark') sets many but not all text colors; this catches the rest. */
+[data-theme="dark"] .preview-content :deep(.vditor-preview) {
+  color: var(--text-primary);
 }
 .preview-empty {
   position: absolute;

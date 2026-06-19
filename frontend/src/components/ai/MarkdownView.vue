@@ -37,7 +37,7 @@ async function render() {
     cdn: `${import.meta.env.BASE_URL}vditor`,
     lang: 'zh_CN',
     icon: 'ant',
-    hljs: { lineNumber: true, style: 'github' },
+    hljs: { lineNumber: true, style: theme.value === 'dark' ? 'github-dark' : 'github' },
     anchor: 0,
   })
 }
@@ -109,6 +109,9 @@ onBeforeUnmount(() => {
 .md-view :deep(.vditor-preview) {
   background: transparent;
   padding: 0;
+}
+[data-theme="dark"] .md-view :deep(.vditor-preview) {
+  color: var(--text-primary);
 }
 .md-view :deep(.vditor-preview p) {
   margin: 0 0 8px;
