@@ -17,6 +17,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.apps.model.category import Category
 from backend.apps.model.note import Note
+from backend.apps.model.note_history import (
+    CHANGE_SOURCE_MANUAL,
+    CHANGE_TYPE_CREATE,
+    CHANGE_TYPE_DELETE,
+    CHANGE_TYPE_UPDATE,
+)
 from backend.apps.utils.exceptions import BusinessError, NotFoundError
 
 logger = logging.getLogger(__name__)
@@ -232,6 +238,9 @@ async def create_note(
     category_id: Optional[int] = None,
     note_tags: Optional[list[str]] = None,
     is_pinned: int = 0,
+    *,
+    change_source: int = CHANGE_SOURCE_MANUAL,
+    remark: Optional[str] = None,
 ) -> Note:
     """Create a new note and populate its search_vector."""
     logger.debug("Create note: user_id=%s, title=%r, category_id=%s", user_id, note_title, category_id)
@@ -248,6 +257,7 @@ async def create_note(
     )
     db.add(note)
     await db.flush()
+    await _record_history(db, note, CHANGE_TYPE_CREATE, change_source, remark)
     logger.info("Create note success: note_id=%s, title=%r, user_id=%s",
                 note.note_id, note_title, user_id)
     return note
@@ -258,6 +268,9 @@ async def update_note(
     user_id: int,
     note_id: int,
     fields: dict[str, Any],
+    *,
+    change_source: int = CHANGE_SOURCE_MANUAL,
+    remark: Optional[str] = None,
 ) -> Note:
     """Update a note with only the provided fields.
 
@@ -305,6 +318,7 @@ async def update_note(
         note.search_vector = _build_search_vector(note.note_title, note.note_content)
 
     await db.flush()
+    await _record_history(db, note, CHANGE_TYPE_UPDATE, change_source, remark)
     logger.info("Update note success: note_id=%s, user_id=%s", note_id, user_id)
     return note
 
@@ -313,6 +327,9 @@ async def delete_note(
     db: AsyncSession,
     user_id: int,
     note_id: int,
+    *,
+    change_source: int = CHANGE_SOURCE_MANUAL,
+    remark: Optional[str] = None,
 ) -> None:
     """Soft delete a note."""
     logger.debug("Delete note: note_id=%s, user_id=%s", note_id, user_id)
@@ -328,6 +345,10 @@ async def delete_note(
         logger.warning("Delete note failed: note_id=%s not found (user_id=%s)", note_id, user_id)
         raise NotFoundError("笔记不存在")
 
+    # Snapshot the pre-delete state before flipping is_deleted. Soft delete only
+    # changes is_deleted, so the snapshotted content fields equal the pre-delete
+    # content — this is the row a user rolls back to in order to undo a delete.
+    await _record_history(db, note, CHANGE_TYPE_DELETE, change_source, remark)
     note.is_deleted = 1
     await db.flush()
     logger.info("Delete note success: note_id=%s, user_id=%s", note_id, user_id)
@@ -414,6 +435,23 @@ async def list_tags(
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
+
+
+async def _record_history(
+    db: AsyncSession,
+    note: Note,
+    change_type: int,
+    change_source: int,
+    remark: Optional[str],
+) -> None:
+    """Write a history snapshot for ``note``.
+
+    Imports ``note_history_service`` lazily to avoid a module-load cycle
+    (the same pattern used for ``category_service`` in ``list_notes_tree``).
+    """
+    from backend.apps.service import note_history_service
+
+    await note_history_service.record_history(db, note, change_type, change_source, remark)
 
 
 def _note_to_dict(note: Note) -> dict:

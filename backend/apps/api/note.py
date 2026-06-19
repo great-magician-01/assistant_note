@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.apps.model.user import User
-from backend.apps.service import note_service
+from backend.apps.service import note_history_service, note_service
 from backend.apps.utils.database import get_db
 from backend.apps.utils.exceptions import NotFoundError
 from backend.apps.utils.security import get_current_user
@@ -69,6 +69,51 @@ class MoveNotesResponse(BaseModel):
     moved: int
     total: int
     category_id: OptionalSnowflakeId = None
+
+
+# ── Note history schemas ─────────────────────────────────────────────────────
+
+
+class NoteHistorySummary(BaseModel):
+    """Lightweight history item for list views (no full content)."""
+
+    history_id: SnowflakeId
+    note_id: SnowflakeId
+    change_type: int = Field(..., description="变更类型(1-创建 2-更新 3-删除 4-回滚)")
+    change_source: int = Field(..., description="变更来源(1-人为 2-AI)")
+    note_word_count: int
+    remark: Optional[str] = None
+    created_at: Optional[str] = None
+
+
+class NoteHistoryListResponse(BaseModel):
+    items: list[NoteHistorySummary]
+    total: int
+    page: int
+    page_size: int
+
+
+class NoteHistoryDetail(BaseModel):
+    """A single history snapshot with full content."""
+
+    history_id: SnowflakeId
+    note_id: SnowflakeId
+    change_type: int = Field(..., description="变更类型(1-创建 2-更新 3-删除 4-回滚)")
+    change_source: int = Field(..., description="变更来源(1-人为 2-AI)")
+    remark: Optional[str] = None
+    category_id: OptionalSnowflakeId = None
+    note_title: str
+    note_content: Optional[str] = None
+    note_summary: Optional[str] = None
+    note_tags: Optional[list] = None
+    note_word_count: int
+    is_pinned: int
+    created_at: Optional[str] = None
+
+
+class NoteRollbackRequest(BaseModel):
+    history_id: SnowflakeId = Field(..., description="要回滚到的历史记录ID")
+    remark: Optional[str] = Field(None, max_length=500, description="回滚备注")
 
 
 class NoteTreeItem(BaseModel):
@@ -261,3 +306,73 @@ async def delete_note(
     logger.debug("DELETE /note/%s: user_id=%s", nid, user.user_id)
     await note_service.delete_note(db, user.user_id, nid)
     return {"message": "删除成功"}
+
+
+@router.get(
+    "/{note_id}/histories",
+    response_model=NoteHistoryListResponse,
+    summary="获取笔记历史记录列表",
+)
+async def list_note_histories(
+    note_id: str,
+    page: int = Query(1, ge=1, description="页码"),
+    page_size: int = Query(20, ge=1, le=100, description="每页数量"),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """List history snapshots for a note (metadata only — no full content).
+
+    History survives note deletion, so this works for soft-deleted notes too.
+    """
+    nid = int(note_id)
+    logger.debug("GET /note/%s/histories: user_id=%s, page=%s", nid, user.user_id, page)
+    return await note_history_service.list_histories(
+        db=db, user_id=user.user_id, note_id=nid, page=page, page_size=page_size
+    )
+
+
+@router.get(
+    "/{note_id}/histories/{history_id}",
+    response_model=NoteHistoryDetail,
+    summary="获取笔记历史记录详情(完整快照)",
+)
+async def get_note_history(
+    note_id: str,
+    history_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Return one history snapshot with full content."""
+    nid = int(note_id)
+    hid = int(history_id)
+    logger.debug("GET /note/%s/histories/%s: user_id=%s", nid, hid, user.user_id)
+    result = await note_history_service.get_history_detail(
+        db=db, user_id=user.user_id, note_id=nid, history_id=hid
+    )
+    if result is None:
+        raise NotFoundError("历史记录不存在")
+    return result
+
+
+@router.post(
+    "/{note_id}/rollback",
+    response_model=NoteResponse,
+    summary="回滚笔记到指定历史版本",
+)
+async def rollback_note(
+    note_id: str,
+    body: NoteRollbackRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Restore a note to the state captured in a history snapshot.
+
+    Revives soft-deleted notes. The rollback itself is recorded as a new
+    history row, so it can be undone by rolling back to the preceding row.
+    """
+    nid = int(note_id)
+    hid = int(body.history_id)
+    logger.debug("POST /note/%s/rollback: user_id=%s, history_id=%s", nid, user.user_id, hid)
+    return await note_history_service.rollback_note(
+        db=db, user_id=user.user_id, note_id=nid, history_id=hid, remark=body.remark
+    )

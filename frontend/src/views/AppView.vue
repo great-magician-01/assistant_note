@@ -4,6 +4,7 @@ import { useRouter } from 'vue-router'
 import AppSidebar from '@/components/layout/AppSidebar.vue'
 import NoteEditor from '@/components/note/NoteEditor.vue'
 import AiChat from '@/components/ai/AiChat.vue'
+import AiSettings from '@/components/ai/AiSettings.vue'
 import Toaster from '@/components/Toaster.vue'
 import CategoryFormModal from '@/components/category/CategoryFormModal.vue'
 import { useAuthStore } from '@/stores/auth'
@@ -22,7 +23,7 @@ const toast = useToast()
 const keyword = ref('')
 const activeTag = ref<string | null>(null)
 const selectedCategoryId = ref<SnowflakeId | null>(null)
-const activeView = ref<'notes' | 'chat'>('notes')
+const activeView = ref<'notes' | 'chat' | 'settings'>('notes')
 
 // Category modal state
 const modalVisible = ref(false)
@@ -76,6 +77,11 @@ async function selectNote(id: SnowflakeId) {
 
 function selectChat() {
   activeView.value = 'chat'
+  noteStore.clearSelection()
+}
+
+function selectSettings() {
+  activeView.value = 'settings'
   noteStore.clearSelection()
 }
 
@@ -140,10 +146,7 @@ onBeforeUnmount(() => {
       :selected-note-id="noteStore.selectedId"
       :active-view="activeView"
       :keyword="keyword"
-      :active-tag="activeTag"
-      :tags="noteStore.tags"
       @update:keyword="keyword = $event"
-      @update:active-tag="activeTag = $event"
       @new-note="newNote()"
       @new-note-in="newNote($event)"
       @new-category="openCreate(null)"
@@ -153,12 +156,14 @@ onBeforeUnmount(() => {
       @rename="openRename($event)"
       @remove="confirmRemoveCategory"
       @select-chat="selectChat"
+      @select-settings="selectSettings"
       @logout="logout"
     />
 
     <main class="main">
       <NoteEditor v-show="activeView === 'notes'" />
       <AiChat v-show="activeView === 'chat'" />
+      <AiSettings v-show="activeView === 'settings'" :visible="activeView === 'settings'" />
     </main>
 
     <CategoryFormModal

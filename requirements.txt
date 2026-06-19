@@ -16,6 +16,8 @@ idna==3.18
 jieba==0.42.1
 jiter==0.15.0
 openai==2.41.1
+anthropic==0.92.0
+docstring-parser==0.18.0
 pydantic==2.13.4
 pydantic-settings==2.14.1
 pydantic_core==2.46.4

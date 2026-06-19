@@ -59,6 +59,26 @@ async def get_ai_config(db: AsyncSession, config_id: int) -> Optional[dict]:
     return _ai_config_to_dict(config, model_map.get(config.model_id))
 
 
+async def get_default_config(db: AsyncSession) -> Optional[dict]:
+    """Return the global default active config (enriched), or None if none set.
+
+    Used by the chat endpoint when the caller omits ``config_id``. Backed by the
+    partial unique index ``uq_ai_configs_default`` (at most one default row).
+    """
+    result = await db.execute(
+        select(AiConfig).where(
+            AiConfig.is_default == 1,
+            AiConfig.is_active == 1,
+            AiConfig.is_deleted == 0,
+        )
+    )
+    config = result.scalar_one_or_none()
+    if config is None:
+        return None
+    model_map = await _model_map(db, {config.model_id})
+    return _ai_config_to_dict(config, model_map.get(config.model_id))
+
+
 async def create_ai_config(db: AsyncSession, fields: dict[str, Any]) -> AiConfig:
     """Create a new runtime config.
 

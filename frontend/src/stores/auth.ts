@@ -9,6 +9,7 @@ export const useAuthStore = defineStore('auth', () => {
   const loading = ref(false)
 
   const isLoggedIn = computed(() => !!tokenStorage.getAccess())
+  const isAdmin = computed(() => user.value?.role_code === 'admin')
   const displayName = computed(() => user.value?.user_name ?? '用户')
   const avatarChar = computed(() => {
     const name = user.value?.user_name ?? ''
@@ -59,6 +60,7 @@ export const useAuthStore = defineStore('auth', () => {
     user,
     loading,
     isLoggedIn,
+    isAdmin,
     displayName,
     avatarChar,
     login,

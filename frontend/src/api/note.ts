@@ -1,6 +1,8 @@
 import { apiGet, apiPost } from './client'
 import type {
   Note,
+  NoteHistoryDetail,
+  NoteHistoryListResponse,
   NoteTreeParams,
   NoteTreeResponse,
   SnowflakeId,
@@ -50,4 +52,23 @@ export function deleteNote(id: SnowflakeId) {
 
 export function moveNotes(note_ids: SnowflakeId[], category_id: SnowflakeId | null) {
   return apiPost<MoveNotesResult>('/v1/note/move', { note_ids, category_id })
+}
+
+// ── Note history ─────────────────────────────────────────────────────────────
+
+export interface NoteHistoryListParams {
+  page?: number
+  page_size?: number
+}
+
+export function listNoteHistories(noteId: SnowflakeId, params: NoteHistoryListParams = {}) {
+  return apiGet<NoteHistoryListResponse>(`/v1/note/${noteId}/histories`, { params })
+}
+
+export function getNoteHistory(noteId: SnowflakeId, historyId: SnowflakeId) {
+  return apiGet<NoteHistoryDetail>(`/v1/note/${noteId}/histories/${historyId}`)
+}
+
+export function rollbackNote(noteId: SnowflakeId, historyId: SnowflakeId, remark?: string | null) {
+  return apiPost<Note>(`/v1/note/${noteId}/rollback`, { history_id: historyId, remark: remark ?? null })
 }

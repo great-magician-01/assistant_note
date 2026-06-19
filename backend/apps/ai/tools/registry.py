@@ -8,6 +8,9 @@ an instance to ``_TOOLS`` below.
 from typing import Optional
 
 from backend.apps.ai.tools.base import BaseTool
+from backend.apps.ai.tools.create_note import CreateNoteTool
+from backend.apps.ai.tools.edit_note import EditNoteTool
+from backend.apps.ai.tools.read_note import ReadNoteTool
 from backend.apps.ai.tools.search_notes import SearchNotesTool
 from backend.apps.ai.tools.search_notes_by_tag import SearchNotesByTagTool
 
@@ -15,6 +18,9 @@ from backend.apps.ai.tools.search_notes_by_tag import SearchNotesByTagTool
 _TOOLS: list[BaseTool] = [
     SearchNotesTool(),
     SearchNotesByTagTool(),
+    ReadNoteTool(),
+    EditNoteTool(),
+    CreateNoteTool(),
 ]
 
 _BY_NAME: dict[str, BaseTool] = {t.name: t for t in _TOOLS}

@@ -9,6 +9,8 @@ import type Vditor from 'vditor'
 // vite.config.ts still serves the on-demand JS (lute, icons, i18n).
 import 'vditor/dist/index.css'
 import Icon from '@/components/Icon.vue'
+import NoteHistoryDrawer from '@/components/note/NoteHistoryDrawer.vue'
+import NoteAiDrawer from '@/components/note/NoteAiDrawer.vue'
 import { useNoteStore } from '@/stores/note'
 import { useCategoryStore } from '@/stores/category'
 import { useToast } from '@/composables/useToast'
@@ -28,6 +30,8 @@ const content = ref('')
 const tagsStr = ref('')
 const saving = ref(false)
 const vditorReady = ref(false)
+const historyVisible = ref(false)
+const aiVisible = ref(false)
 // Preview is the default when opening a note; the user opts into editing via
 // the toolbar toggle. Empty notes (incl. just-created ones) skip preview since
 // there is nothing to read.
@@ -207,7 +211,15 @@ watch(
       // Instance already loaded — swap in the new note's content.
       vditorInstance.setValue(content.value, true)
     }
-    if (mode.value === 'preview') void renderPreview()
+    // The preview/edit host lives inside the `v-else` block, which is only in
+    // the DOM while a note is selected. Switching from the empty state to the
+    // first note updates the DOM *after* this pre-flush watcher runs, so
+    // previewRef is still null here on that first switch (renderPreview would
+    // bail, leaving the body blank until a later note switch re-binds the ref).
+    // Defer to the next tick — mirroring ensureVditor — so the ref is bound.
+    if (mode.value === 'preview') {
+      void nextTick().then(() => renderPreview())
+    }
   },
   { immediate: true },
 )
@@ -301,8 +313,55 @@ async function confirmDelete() {
   }
 }
 
-function onAi() {
-  toast.info('AI 助手推理接口尚未上线，敬请期待')
+function toggleAi() {
+  if (!note.value) return
+  aiVisible.value = !aiVisible.value
+}
+
+function openHistory() {
+  if (!note.value) return
+  historyVisible.value = true
+}
+
+// After a server-side change to the current note (history rollback, or the AI
+// drawer editing the note via a tool), re-fetch it and re-seed the local
+// editor state. The note_id watch can't do this: it early-returns when the id
+// is unchanged (an intentional guard against autosave echo snapping edits back),
+// so a same-id refresh must be done explicitly here.
+function syncFromNote() {
+  const n = note.value
+  if (!n) return
+  title.value = n.note_title ?? ''
+  content.value = n.note_content ?? ''
+  tagsStr.value = (n.note_tags ?? []).join(', ')
+  if (vditorInstance && vditorReady.value) {
+    vditorInstance.setValue(content.value, true)
+  }
+  if (mode.value === 'preview') {
+    void nextTick().then(() => renderPreview())
+  }
+}
+
+async function reloadCurrentNote() {
+  if (!note.value) return
+  // Flush any pending autosave first so we don't overwrite the server-side
+  // content with stale local edits.
+  if (saveTimer) {
+    window.clearTimeout(saveTimer)
+    saveTimer = undefined
+  }
+  await noteStore.selectNote(note.value.note_id)
+  syncFromNote()
+}
+
+async function onRolledBack() {
+  await reloadCurrentNote()
+}
+
+// The note's AI drawer edited the note in place via a tool — reload so the
+// editor reflects the AI's changes instead of showing stale local content.
+function onAiNoteChanged() {
+  void reloadCurrentNote()
 }
 
 // React to app theme changes.
@@ -374,6 +433,17 @@ onBeforeUnmount(() => {
             @click="togglePin"
           >
             <Icon name="pin" :size="16" />
+          </button>
+          <button class="toolbar-btn" title="历史记录" @click="openHistory">
+            <Icon name="clock" :size="16" />
+          </button>
+          <button
+            class="toolbar-btn"
+            :class="{ active: aiVisible }"
+            title="AI 助手"
+            @click="toggleAi"
+          >
+            <Icon name="robot" :size="16" />
           </button>
           <button class="toolbar-btn" title="删除" @click="confirmDelete">
             <Icon name="trash" :size="16" />
@@ -448,17 +518,24 @@ onBeforeUnmount(() => {
           />
         </div>
 
-        <div class="ai-bar">
-          <Icon name="robot" :size="18" class="ai-icon" />
-          <span class="ai-bar-text">AI 助手可帮你续写、润色或总结这篇笔记</span>
-          <button class="ai-bar-btn" @click="onAi">AI 助手</button>
-        </div>
-
         <div class="vditor-wrap">
           <div ref="vditorRef" class="vditor-host" />
           <div v-if="!vditorReady" class="vditor-loading">编辑器加载中…</div>
         </div>
       </div>
+
+      <NoteHistoryDrawer
+        v-model:visible="historyVisible"
+        :note-id="note.note_id"
+        @rolled-back="onRolledBack"
+      />
+
+      <NoteAiDrawer
+        v-model:visible="aiVisible"
+        :note-id="note.note_id"
+        :note-title="title || note.note_title || '无标题'"
+        @note-changed="onAiNoteChanged"
+      />
     </template>
   </div>
 </template>
@@ -470,6 +547,8 @@ onBeforeUnmount(() => {
   display: flex;
   flex-direction: column;
   min-width: 0;
+  min-height: 0;
+  position: relative;
 }
 .empty-state {
   flex: 1;
@@ -588,37 +667,6 @@ onBeforeUnmount(() => {
   height: 32px;
   padding: 0 10px;
   font-size: 13px;
-}
-.ai-bar {
-  margin-bottom: 16px;
-  padding: 12px 16px;
-  background: var(--accent-light);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-.ai-icon {
-  color: var(--accent);
-  flex-shrink: 0;
-}
-.ai-bar-text {
-  flex: 1;
-  font-size: 13px;
-  color: var(--text-accent);
-}
-.ai-bar-btn {
-  padding: 5px 12px;
-  border-radius: 6px;
-  font-size: 12px;
-  font-weight: 500;
-  background: var(--accent);
-  color: #fff;
-  transition: background 0.2s;
-}
-.ai-bar-btn:hover {
-  background: var(--accent-hover);
 }
 .vditor-wrap {
   position: relative;

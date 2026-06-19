@@ -11,15 +11,12 @@ import type { SnowflakeId } from '@/types'
 const props = defineProps<{
   selectedCategoryId: SnowflakeId | null
   selectedNoteId: SnowflakeId | null
-  activeView: 'notes' | 'chat'
+  activeView: 'notes' | 'chat' | 'settings'
   keyword: string
-  activeTag: string | null
-  tags: string[]
 }>()
 
 const emit = defineEmits<{
   'update:keyword': [value: string]
-  'update:activeTag': [value: string | null]
   'new-note': []
   'new-note-in': [categoryId: SnowflakeId]
   'new-category': []
@@ -29,6 +26,7 @@ const emit = defineEmits<{
   rename: [node: import('@/types').CategoryNode]
   remove: [node: import('@/types').CategoryNode]
   'select-chat': []
+  'select-settings': []
   logout: []
 }>()
 
@@ -92,26 +90,6 @@ const uncategorized = () => noteStore.tree?.uncategorized ?? []
       />
     </div>
 
-    <!-- Tag filter -->
-    <div v-if="tags.length" class="tag-bar">
-      <button
-        class="tag-chip"
-        :class="{ active: !activeTag }"
-        @click="emit('update:activeTag', null)"
-      >
-        全部
-      </button>
-      <button
-        v-for="t in tags"
-        :key="t"
-        class="tag-chip"
-        :class="{ active: activeTag === t }"
-        @click="emit('update:activeTag', t)"
-      >
-        {{ t }}
-      </button>
-    </div>
-
     <!-- Combined category + note tree -->
     <div class="sidebar-content">
       <div v-if="noteStore.treeLoading && !noteStore.tree" class="loading-hint">
@@ -171,6 +149,16 @@ const uncategorized = () => noteStore.tree?.uncategorized ?? []
         <span class="tree-toggle" style="visibility: hidden"></span>
         <Icon name="robot" :size="16" class="row-icon" />
         <span class="tree-label">AI 对话</span>
+      </div>
+      <div
+        v-if="authStore.isAdmin"
+        class="tree-row ai-row"
+        :class="{ active: activeView === 'settings' }"
+        @click="emit('select-settings')"
+      >
+        <span class="tree-toggle" style="visibility: hidden"></span>
+        <Icon name="settings" :size="16" class="row-icon" />
+        <span class="tree-label">AI 设置</span>
       </div>
     </div>
 
@@ -244,31 +232,6 @@ const uncategorized = () => noteStore.tree?.uncategorized ?? []
   height: 30px;
   padding: 0 10px 0 30px;
   font-size: 12px;
-}
-.tag-bar {
-  display: flex;
-  gap: 6px;
-  padding: 0 14px 8px;
-  overflow-x: auto;
-  flex-wrap: nowrap;
-}
-.tag-chip {
-  flex-shrink: 0;
-  padding: 2px 9px;
-  border-radius: 12px;
-  font-size: 11px;
-  color: var(--text-secondary);
-  background: var(--bg-input);
-  border: 1px solid var(--border);
-  transition: all 0.15s;
-}
-.tag-chip:hover {
-  background: var(--bg-hover);
-}
-.tag-chip.active {
-  background: var(--accent);
-  color: #fff;
-  border-color: var(--accent);
 }
 .sidebar-content {
   flex: 1;

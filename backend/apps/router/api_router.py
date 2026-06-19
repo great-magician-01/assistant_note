@@ -2,6 +2,7 @@
 
 from fastapi import APIRouter
 
+from backend.apps.api.ai_chat import router as ai_chat_router
 from backend.apps.api.ai_config import router as ai_config_router
 from backend.apps.api.ai_model import router as ai_model_router
 from backend.apps.api.ai_tool import router as ai_tool_router
@@ -18,3 +19,4 @@ api_router.include_router(upload_router)
 api_router.include_router(ai_model_router)
 api_router.include_router(ai_config_router)
 api_router.include_router(ai_tool_router)
+api_router.include_router(ai_chat_router)

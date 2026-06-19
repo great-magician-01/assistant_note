@@ -1,20 +1,35 @@
 <script setup lang="ts">
 import { ref, onMounted, nextTick, computed } from 'vue'
 import Icon from '@/components/Icon.vue'
-import { listAiConfigs } from '@/api/ai'
+import MarkdownView from '@/components/ai/MarkdownView.vue'
+import { listAiConfigs, streamChat, listChatSessions, getChatMessages, deleteChatSession } from '@/api/ai'
 import { useAuthStore } from '@/stores/auth'
 import { useToast } from '@/composables/useToast'
 import { extractErrorMessage } from '@/api/client'
-import type { AiConfig, ChatMessage } from '@/types'
+import type { AiConfig, ChatSession, SnowflakeId } from '@/types'
 
 const authStore = useAuthStore()
 const toast = useToast()
 
-const messages = ref<ChatMessage[]>([])
+interface ToolChip {
+  id: string
+  name: string
+  result?: string
+  isError?: boolean
+  pending: boolean
+}
+interface Bubble {
+  role: 'user' | 'ai'
+  text: string
+  tools: ToolChip[]
+}
+
+const bubbles = ref<Bubble[]>([])
 const input = ref('')
 const sending = ref(false)
 const configs = ref<AiConfig[]>([])
-const loadingConfigs = ref(false)
+const sessions = ref<ChatSession[]>([])
+const currentSessionId = ref<SnowflakeId | null>(null)
 const messagesEl = ref<HTMLDivElement | null>(null)
 
 const activeConfig = computed(
@@ -25,26 +40,31 @@ const activeConfig = computed(
 )
 
 onMounted(async () => {
-  await loadConfigs()
-  if (!messages.value.length) {
-    messages.value.push({
+  await Promise.all([loadConfigs(), loadSessions()])
+  if (!bubbles.value.length) {
+    bubbles.value.push({
       role: 'ai',
-      content:
-        '你好！我是 DeepSeek AI 助手。你可以向我提问、让我总结笔记或帮你润色文字。\n\n（提示：AI 推理接口尚未在后端上线，当前为离线演示模式。）',
+      text: '你好！我是 AI 助手。可以搜索/读取/编辑你的笔记，或直接提问。',
+      tools: [],
     })
   }
 })
 
 async function loadConfigs() {
-  loadingConfigs.value = true
   try {
     configs.value = await listAiConfigs()
   } catch (err) {
-    // Non-fatal — configs may not be set up yet.
     configs.value = []
     console.warn(extractErrorMessage(err, '加载 AI 配置失败'))
-  } finally {
-    loadingConfigs.value = false
+  }
+}
+
+async function loadSessions() {
+  try {
+    sessions.value = await listChatSessions()
+  } catch (err) {
+    sessions.value = []
+    console.warn(extractErrorMessage(err, '加载会话列表失败'))
   }
 }
 
@@ -53,35 +73,140 @@ async function scrollToBottom() {
   if (messagesEl.value) messagesEl.value.scrollTop = messagesEl.value.scrollHeight
 }
 
+async function selectSession(id: SnowflakeId) {
+  if (sending.value) return
+  currentSessionId.value = id
+  bubbles.value = []
+  try {
+    const rows = await getChatMessages(id)
+    // Reconstruct bubbles: assistant text + following tool rows become one AI bubble.
+    for (const row of rows) {
+      if (row.role === 'user') {
+        bubbles.value.push({ role: 'user', text: row.content ?? '', tools: [] })
+      } else if (row.role === 'assistant') {
+        bubbles.value.push({
+          role: 'ai',
+          text: row.content ?? '',
+          tools: [],
+        })
+      } else if (row.role === 'tool') {
+        // Attach tool result to the last AI bubble.
+        const last = bubbles.value[bubbles.value.length - 1]
+        const target = last && last.role === 'ai' ? last : null
+        const chip: ToolChip = {
+          id: row.tool_call_id ?? '',
+          name: row.tool_name ?? '',
+          result: row.content ?? '',
+          isError: row.is_error === 1,
+          pending: false,
+        }
+        if (target) target.tools.push(chip)
+        else bubbles.value.push({ role: 'ai', text: '', tools: [chip] })
+      }
+    }
+    if (!bubbles.value.length) {
+      bubbles.value.push({ role: 'ai', text: '（空会话）', tools: [] })
+    }
+    await scrollToBottom()
+  } catch (err) {
+    toast.error(extractErrorMessage(err, '加载会话失败'))
+  }
+}
+
+function newChat() {
+  if (sending.value) return
+  currentSessionId.value = null
+  bubbles.value = [
+    { role: 'ai', text: '开始新的对话吧。', tools: [] },
+  ]
+}
+
 async function send() {
   const text = input.value.trim()
   if (!text || sending.value) return
-  messages.value.push({ role: 'user', content: text })
+
+  if (!activeConfig.value) {
+    toast.info('未检测到可用的 AI 配置，请先在设置中添加模型与配置')
+    return
+  }
+
+  bubbles.value.push({ role: 'user', text, tools: [] })
   input.value = ''
   sending.value = true
+  const aiBubble: Bubble = { role: 'ai', text: '', tools: [] }
+  bubbles.value.push(aiBubble)
   await scrollToBottom()
 
-  // The backend does not yet expose a chat-completion endpoint. We surface a
-  // clear, honest placeholder reply rather than fabricating model output.
-  await new Promise((r) => setTimeout(r, 400))
-  messages.value.push({
-    role: 'ai',
-    content:
-      'AI 推理接口（/v1/ai/chat）尚未在后端上线，暂时无法生成回复。\n\n' +
-      `当前已配置 ${configs.value.length} 个 AI 配置${
-        activeConfig.value ? `（默认：${activeConfig.value.config_name}）` : ''
-      }。待后端接入模型推理后即可正常对话。`,
-  })
-  sending.value = false
-  await scrollToBottom()
+  // Track tool chips by id so tool_end updates the matching tool_start chip.
+  const toolIndex = new Map<string, ToolChip>()
 
-  if (!configs.value.length) {
-    toast.info('未检测到 AI 配置，请先在设置中添加模型与配置')
+  try {
+    await streamChat(
+      {
+        session_id: currentSessionId.value,
+        message: text,
+        config_id: activeConfig.value.config_id,
+      },
+      {
+        onSession: (data) => {
+          currentSessionId.value = data.session_id
+        },
+        onText: (delta) => {
+          aiBubble.text += delta
+          void scrollToBottom()
+        },
+        onToolStart: (data) => {
+          const chip: ToolChip = { id: data.id, name: data.name, pending: true }
+          toolIndex.set(data.id, chip)
+          aiBubble.tools.push(chip)
+        },
+        onToolEnd: (data) => {
+          const chip = toolIndex.get(data.id)
+          if (chip) {
+            chip.result = data.result
+            chip.isError = data.is_error
+            chip.pending = false
+          } else {
+            aiBubble.tools.push({
+              id: data.id,
+              name: data.name,
+              result: data.result,
+              isError: data.is_error,
+              pending: false,
+            })
+          }
+        },
+        onDone: () => {
+          // Refresh session list so the new/updated session shows with its title.
+          void loadSessions()
+        },
+        onError: (message) => {
+          if (!aiBubble.text) aiBubble.text = '（对话出错）'
+          toast.error(message)
+        },
+      },
+    )
+  } catch (err) {
+    toast.error(extractErrorMessage(err, '对话失败'))
+  } finally {
+    sending.value = false
+    await scrollToBottom()
+  }
+}
+
+async function removeSession(id: SnowflakeId) {
+  if (!window.confirm('删除该会话？')) return
+  try {
+    await deleteChatSession(id)
+    sessions.value = sessions.value.filter((s) => s.session_id !== id)
+    if (currentSessionId.value === id) newChat()
+    toast.success('已删除')
+  } catch (err) {
+    toast.error(extractErrorMessage(err, '删除失败'))
   }
 }
 
 function onKeydown(e: KeyboardEvent) {
-  // Ctrl/Cmd+Enter to send, plain Enter for newline.
   if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
     e.preventDefault()
     void send()
@@ -91,50 +216,93 @@ function onKeydown(e: KeyboardEvent) {
 
 <template>
   <div class="chat-view">
-    <div class="chat-header">
-      <div class="chat-header-icon">
-        <Icon name="robot" :size="20" />
-      </div>
-      <div class="chat-header-info">
-        <div class="chat-header-title">DeepSeek AI 助手</div>
-        <div class="chat-header-status">
-          <template v-if="loadingConfigs">加载配置中…</template>
-          <template v-else-if="activeConfig">
-            {{ activeConfig.config_name }} · {{ activeConfig.model || '未知模型' }}
-          </template>
-          <template v-else>未配置可用模型</template>
-        </div>
-      </div>
-    </div>
-
-    <div ref="messagesEl" class="chat-messages">
-      <div
-        v-for="(msg, i) in messages"
-        :key="i"
-        class="chat-message"
-        :class="msg.role"
-      >
-        <div class="chat-avatar">
-          {{ msg.role === 'user' ? authStore.avatarChar : 'AI' }}
-        </div>
-        <div class="chat-bubble">{{ msg.content }}</div>
-      </div>
-      <div v-if="sending" class="chat-message ai">
-        <div class="chat-avatar">AI</div>
-        <div class="chat-bubble typing">思考中…</div>
-      </div>
-    </div>
-
-    <div class="chat-input-area">
-      <textarea
-        v-model="input"
-        class="chat-textarea"
-        placeholder="向 AI 提问…（Ctrl+Enter 发送）"
-        @keydown="onKeydown"
-      />
-      <button class="chat-send-btn" :disabled="!input.trim() || sending" @click="send">
-        <Icon name="send" :size="18" />
+    <div class="chat-sidebar">
+      <button class="new-chat-btn" @click="newChat">
+        <Icon name="plus" :size="16" />
+        <span>新对话</span>
       </button>
+      <div class="session-list">
+        <div v-if="!sessions.length" class="session-empty">暂无历史会话</div>
+        <div
+          v-for="s in sessions"
+          :key="s.session_id"
+          class="session-item"
+          :class="{ active: currentSessionId === s.session_id }"
+          @click="selectSession(s.session_id)"
+        >
+          <Icon name="chat" :size="14" class="session-icon" />
+          <span class="session-title">{{ s.session_title || '新对话' }}</span>
+          <button class="session-del" title="删除" @click.stop="removeSession(s.session_id)">
+            <Icon name="trash" :size="13" />
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <div class="chat-main">
+      <div class="chat-header">
+        <div class="chat-header-icon">
+          <Icon name="robot" :size="20" />
+        </div>
+        <div class="chat-header-info">
+          <div class="chat-header-title">AI 助手</div>
+          <div class="chat-header-status">
+            <template v-if="activeConfig">
+              {{ activeConfig.config_name }} · {{ activeConfig.model || '未知模型' }}
+            </template>
+            <template v-else>未配置可用模型</template>
+          </div>
+        </div>
+      </div>
+
+      <div ref="messagesEl" class="chat-messages">
+        <div
+          v-for="(msg, i) in bubbles"
+          :key="i"
+          class="chat-message"
+          :class="msg.role"
+        >
+          <div class="chat-avatar">
+            {{ msg.role === 'user' ? authStore.avatarChar : 'AI' }}
+          </div>
+          <div class="chat-content">
+            <div v-if="msg.tools.length" class="tool-chips">
+              <div
+                v-for="(t, j) in msg.tools"
+                :key="j"
+                class="tool-chip"
+                :class="{ error: t.isError, pending: t.pending }"
+              >
+                <Icon name="tool" :size="12" />
+                <span class="tool-name">{{ t.name }}</span>
+                <span v-if="t.pending" class="tool-status">执行中…</span>
+                <span v-else-if="t.isError" class="tool-status">失败</span>
+                <span v-else class="tool-status">完成</span>
+              </div>
+            </div>
+            <MarkdownView
+              v-if="msg.text"
+              class="chat-bubble"
+              :content="msg.text"
+              :plain="msg.role === 'user'"
+              :streaming="sending && i === bubbles.length - 1 && msg.role === 'ai'"
+            />
+            <div v-else-if="sending && i === bubbles.length - 1" class="chat-bubble typing">思考中…</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="chat-input-area">
+        <textarea
+          v-model="input"
+          class="chat-textarea"
+          placeholder="向 AI 提问…（Ctrl+Enter 发送）"
+          @keydown="onKeydown"
+        />
+        <button class="chat-send-btn" :disabled="!input.trim() || sending" @click="send">
+          <Icon name="send" :size="18" />
+        </button>
+      </div>
     </div>
   </div>
 </template>
@@ -143,8 +311,95 @@ function onKeydown(e: KeyboardEvent) {
 .chat-view {
   flex: 1;
   display: flex;
-  flex-direction: column;
   background: var(--bg-main);
+  min-width: 0;
+}
+.chat-sidebar {
+  width: 220px;
+  flex-shrink: 0;
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  padding: 12px;
+  gap: 10px;
+  overflow: hidden;
+}
+.new-chat-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 500;
+}
+.new-chat-btn:hover {
+  background: var(--accent-hover);
+}
+.session-list {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.session-empty {
+  font-size: 12px;
+  color: var(--text-tertiary);
+  padding: 12px 8px;
+  text-align: center;
+}
+.session-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+.session-item:hover {
+  background: var(--bg-hover);
+}
+.session-item.active {
+  background: var(--accent-light);
+  color: var(--text-primary);
+}
+.session-icon {
+  color: var(--text-tertiary);
+  flex-shrink: 0;
+}
+.session-title {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.session-del {
+  opacity: 0;
+  width: 22px;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 5px;
+  color: var(--text-tertiary);
+  flex-shrink: 0;
+}
+.session-item:hover .session-del {
+  opacity: 1;
+}
+.session-del:hover {
+  background: var(--bg-input);
+  color: #dc2626;
+}
+.chat-main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
   min-width: 0;
 }
 .chat-header {
@@ -186,7 +441,6 @@ function onKeydown(e: KeyboardEvent) {
   display: flex;
   gap: 12px;
   max-width: 85%;
-  white-space: pre-wrap;
 }
 .chat-message.user {
   align-self: flex-end;
@@ -213,6 +467,42 @@ function onKeydown(e: KeyboardEvent) {
 .chat-message.ai .chat-avatar {
   background: var(--accent-light);
   color: var(--accent);
+}
+.chat-content {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+.tool-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.tool-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 9px;
+  border-radius: 12px;
+  font-size: 11px;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+}
+.tool-chip.pending {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+.tool-chip.error {
+  color: #dc2626;
+  border-color: rgba(220, 38, 38, 0.4);
+}
+.tool-name {
+  font-weight: 600;
+}
+.tool-status {
+  color: var(--text-tertiary);
 }
 .chat-bubble {
   padding: 12px 16px;
