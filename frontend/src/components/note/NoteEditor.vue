@@ -563,8 +563,6 @@ onBeforeUnmount(() => {
   flex-direction: row;
   min-height: 0;
   overflow: hidden;
-  /* Breathing room between the toolbar and the note body. */
-  padding-top: 80px;
 }
 .empty-state {
   flex: 1;

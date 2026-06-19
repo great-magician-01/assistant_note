@@ -10,11 +10,11 @@
 -- ---------------------------------------------------------------------------
 -- users: 增加 audit_status 列
 -- ---------------------------------------------------------------------------
-ALTER TABLE users ADD COLUMN audit_status SMALLINT NOT NULL DEFAULT 0;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS audit_status SMALLINT NOT NULL DEFAULT 0;
 
 COMMENT ON COLUMN users.audit_status IS '审核状态(0=待审核 1=已通过 2=已拒绝)';
 
 -- 回填历史用户为已通过(他们注册时审核制尚未生效, 视为已通过)
 UPDATE users SET audit_status = 1 WHERE audit_status = 0;
 
-CREATE INDEX ix_users_audit_status ON users (audit_status);
+CREATE INDEX IF NOT EXISTS ix_users_audit_status ON users (audit_status);

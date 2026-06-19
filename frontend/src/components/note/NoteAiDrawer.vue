@@ -240,7 +240,7 @@ function onKeydown(e: KeyboardEvent) {
 <template>
   <aside
     v-show="visible"
-    class="note-ai-drawer flex flex-col bg-[var(--bg-main)] border-l border-[var(--border)] fixed inset-0 z-50 w-full md:static md:z-auto md:w-[420px] md:flex-shrink-0"
+    class="note-ai-drawer flex flex-col fixed inset-0 z-50 w-full md:static md:z-auto md:w-[420px] md:flex-shrink-0"
   >
     <header class="drawer-header">
       <div class="drawer-title-wrap">
@@ -307,6 +307,7 @@ function onKeydown(e: KeyboardEvent) {
 <style scoped>
 .note-ai-drawer {
   background: var(--bg-main);
+  border-left: 1px solid var(--border);
 }
 .drawer-header {
   display: flex;

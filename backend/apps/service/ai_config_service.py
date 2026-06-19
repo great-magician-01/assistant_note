@@ -10,6 +10,7 @@ import logging
 from typing import Any, Optional
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.apps.ai.tools.registry import list_tools
@@ -136,6 +137,11 @@ async def ensure_default_config(
             logger.warning("Default AI config not created: no model_id provided")
             return
         logger.info("Creating default AI config bound to model_id=%s", model_id)
+        # Clear any other default before claiming the single default slot, so we
+        # don't trip the partial unique index uq_ai_configs_default (→ 500). The
+        # check-then-insert above is also non-atomic; guard the flush against a
+        # concurrent insert with the same fixed config_id and re-query on clash.
+        await _clear_other_defaults(db, exclude_id=DEFAULT_CONFIG_ID)
         config = AiConfig(
             config_id=DEFAULT_CONFIG_ID,
             config_name="默认助手",
@@ -147,14 +153,21 @@ async def ensure_default_config(
             is_active=1,
         )
         db.add(config)
-        await db.flush()
+        try:
+            await db.flush()
+        except IntegrityError:
+            await db.rollback()
+            logger.warning("Default AI config raced with another caller; re-querying")
+            return await ensure_default_config(db, model_id=model_id, max_tokens=max_tokens)
         logger.info("Default AI config created: config_id=%s, model_id=%s, tools=%d",
                      config.config_id, model_id, len(all_tool_names))
         return
 
     # Config already exists — resurrect if soft-deleted/disabled and refresh
     # tools.  Never overwrite model_id / system_prompt / sampling params —
-    # those belong to the admin.
+    # those belong to the admin.  Exception: a placeholder default config
+    # (model_id=None, created when the model pool was empty) gets bound to the
+    # first model added, realizing the migration 008 "bind later" intent.
     updated = False
 
     if config.is_deleted != 0:
@@ -166,6 +179,13 @@ async def ensure_default_config(
         config.is_active = 1
         updated = True
         logger.info("Default AI config re-activated")
+
+    if config.model_id is None and model_id is not None:
+        config.model_id = model_id
+        if config.max_tokens is None and max_tokens is not None:
+            config.max_tokens = max_tokens
+        updated = True
+        logger.info("Default AI config placeholder bound to model_id=%s", model_id)
 
     existing_tools: set[str] = set(config.tools or [])
     new_tools = [t for t in all_tool_names if t not in existing_tools]

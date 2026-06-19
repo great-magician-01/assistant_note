@@ -73,10 +73,16 @@ async function scrollToBottom() {
   if (messagesEl.value) messagesEl.value.scrollTop = messagesEl.value.scrollHeight
 }
 
+// Monotonic token so a slow message fetch from an older session can't
+// overwrite the bubbles of the session the user has since switched to.
+let loadToken = 0
+
 async function loadSessionMessages(id: SnowflakeId) {
+  const token = ++loadToken
   bubbles.value = []
   try {
     const rows = await getChatMessages(id)
+    if (token !== loadToken) return  // a newer switch superseded this fetch
     for (const row of rows) {
       if (row.role === 'user') {
         bubbles.value.push({ role: 'user', text: row.content ?? '', tools: [] })
@@ -96,11 +102,13 @@ async function loadSessionMessages(id: SnowflakeId) {
         else bubbles.value.push({ role: 'ai', text: '', tools: [chip] })
       }
     }
+    if (token !== loadToken) return
     if (!bubbles.value.length) {
       bubbles.value.push({ role: 'ai', text: '（空会话）', tools: [] })
     }
     await scrollToBottom()
   } catch (err) {
+    if (token !== loadToken) return
     toast.error(extractErrorMessage(err, '加载会话失败'))
   }
 }

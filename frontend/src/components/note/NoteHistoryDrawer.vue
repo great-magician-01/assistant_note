@@ -178,9 +178,12 @@ const latestHistoryId = computed(() => {
 
 /** Switch to diff mode and ensure both sides are loaded. */
 async function switchToDiff() {
+  // No histories → nothing to compare against; stay in preview. (The tab is
+  // also disabled, this guards against programmatic entry.)
+  if (!histories.value.length || !latestHistoryId.value) return
   mode.value = 'diff'
   // Default: latest history vs current
-  if (diffVersionA.value === 'current' && diffVersionB.value === 'latest' && latestHistoryId.value) {
+  if (diffVersionA.value === 'current' && diffVersionB.value === 'latest') {
     diffVersionA.value = latestHistoryId.value
     diffVersionB.value = 'current'
   }
@@ -248,7 +251,7 @@ watch(
         <!-- Mode tabs -->
         <div class="detail-tabs">
           <button class="tab-btn" :class="{ active: mode === 'preview' }" @click="mode = 'preview'">预览</button>
-          <button class="tab-btn" :class="{ active: mode === 'diff' }" @click="switchToDiff">对比</button>
+          <button class="tab-btn" :class="{ active: mode === 'diff' }" :disabled="!histories.length" @click="switchToDiff">对比</button>
         </div>
 
         <!-- Preview mode -->

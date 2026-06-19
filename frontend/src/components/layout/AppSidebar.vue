@@ -253,7 +253,11 @@ const uncategorized = () => noteStore.tree?.uncategorized ?? []
   border-right: 1px solid var(--border);
   display: flex;
   flex-direction: column;
-  transition: background 0.3s, border-color 0.3s;
+  /* `transform` must be listed here too: AppView drives the mobile slide via a
+     Tailwind `transition-transform` utility, but scoped CSS outranks Tailwind's
+     @layer utilities, so omitting transform would reset transition-property and
+     the drawer would snap instead of sliding. */
+  transition: background 0.3s, border-color 0.3s, transform 0.2s ease;
 }
 .sidebar-header {
   height: var(--header-height);

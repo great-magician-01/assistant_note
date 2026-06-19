@@ -1,0 +1,2760 @@
+diff --git a/frontend/src/api/auth.ts b/frontend/src/api/auth.ts
+index e4ee2e1..01db71b 100644
+--- a/frontend/src/api/auth.ts
++++ b/frontend/src/api/auth.ts
+@@ -1,5 +1,5 @@
+ import { apiGet, apiPost } from './client'
+-import type { TokenResponse, UserInfo } from '@/types'
++import type { RegisterResponse, TokenResponse, UserInfo } from '@/types'
+ 
+ export function login(user_account: string, password: string) {
+   return apiPost<TokenResponse>('/v1/auth/login', { user_account, password })
+@@ -10,7 +10,7 @@ export function register(body: {
+   user_name: string
+   password: string
+ }) {
+-  return apiPost<TokenResponse>('/v1/auth/register', body)
++  return apiPost<RegisterResponse>('/v1/auth/register', body)
+ }
+ 
+ export function refresh(refresh_token: string) {
+diff --git a/frontend/src/api/user.ts b/frontend/src/api/user.ts
+new file mode 100644
+index 0000000..90262c9
+--- /dev/null
++++ b/frontend/src/api/user.ts
+@@ -0,0 +1,27 @@
++import { apiGet, apiPost } from './client'
++import type { UserItem, UserListResponse } from '@/types'
++
++export function listUsers(params: {
++  status?: number | null
++  keyword?: string | null
++  page?: number
++  page_size?: number
++} = {}) {
++  return apiGet<UserListResponse>('/v1/user', { params })
++}
++
++export function approveUser(user_id: string) {
++  return apiPost<UserItem>(`/v1/user/${user_id}/approve`)
++}
++
++export function rejectUser(user_id: string) {
++  return apiPost<UserItem>(`/v1/user/${user_id}/reject`)
++}
++
++export function updateUser(user_id: string, body: { is_active?: number }) {
++  return apiPost<UserItem>(`/v1/user/${user_id}/update`, body)
++}
++
++export function resetUserPassword(user_id: string, password: string) {
++  return apiPost<{ message: string }>(`/v1/user/${user_id}/reset-password`, { password })
++}
+diff --git a/frontend/src/assets/icons/menu.svg b/frontend/src/assets/icons/menu.svg
+new file mode 100644
+index 0000000..9fe0541
+--- /dev/null
++++ b/frontend/src/assets/icons/menu.svg
+@@ -0,0 +1 @@
++<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+\ No newline at end of file
+diff --git a/frontend/src/components/Modal.vue b/frontend/src/components/Modal.vue
+index 1a639e7..8103aff 100644
+--- a/frontend/src/components/Modal.vue
++++ b/frontend/src/components/Modal.vue
+@@ -11,7 +11,7 @@ const emit = defineEmits<{ close: [] }>()
+ 
+ <template>
+   <Teleport to="body">
+-    <div class="modal-overlay" @click.self="emit('close')">
++    <div class="modal-overlay p-3 md:p-5" @click.self="emit('close')">
+       <div class="modal" :style="{ maxWidth: width ?? '420px' }">
+         <div class="modal-header">
+           <span class="modal-title">{{ title }}</span>
+@@ -39,7 +39,6 @@ const emit = defineEmits<{ close: [] }>()
+   align-items: center;
+   justify-content: center;
+   z-index: 1000;
+-  padding: 20px;
+   animation: fade 0.15s ease;
+ }
+ @keyframes fade {
+@@ -76,6 +75,7 @@ const emit = defineEmits<{ close: [] }>()
+ }
+ .modal-footer {
+   display: flex;
++  flex-wrap: wrap;
+   justify-content: flex-end;
+   gap: 8px;
+   padding: 12px 18px;
+diff --git a/frontend/src/components/Toaster.vue b/frontend/src/components/Toaster.vue
+index a7bb767..0333928 100644
+--- a/frontend/src/components/Toaster.vue
++++ b/frontend/src/components/Toaster.vue
+@@ -47,7 +47,7 @@ const toast = useToast()
+   border: 1px solid var(--border);
+   box-shadow: var(--shadow-lg);
+   color: var(--text-primary);
+-  max-width: 460px;
++  max-width: min(460px, calc(100vw - 32px));
+   cursor: pointer;
+ }
+ .dot {
+diff --git a/frontend/src/components/admin/UserManage.vue b/frontend/src/components/admin/UserManage.vue
+new file mode 100644
+index 0000000..6003b7b
+--- /dev/null
++++ b/frontend/src/components/admin/UserManage.vue
+@@ -0,0 +1,546 @@
++<script setup lang="ts">
++import { ref, watch, computed } from 'vue'
++import dayjs from 'dayjs'
++import Icon from '@/components/Icon.vue'
++import Modal from '@/components/Modal.vue'
++import { useAuthStore } from '@/stores/auth'
++import { useToast } from '@/composables/useToast'
++import { extractErrorMessage } from '@/api/client'
++import * as userApi from '@/api/user'
++import { USER_AUDIT_STATUS, type UserItem } from '@/types'
++
++const props = defineProps<{
++  /** Whether this view is the active one — drives lazy loading. */
++  visible: boolean
++}>()
++
++const authStore = useAuthStore()
++const toast = useToast()
++
++type Filter = 'all' | 'pending' | 'approved' | 'rejected'
++const FILTERS: { key: Filter; label: string; status: number | null }[] = [
++  { key: 'all', label: '全部', status: null },
++  { key: 'pending', label: '待审核', status: USER_AUDIT_STATUS.PENDING },
++  { key: 'approved', label: '已通过', status: USER_AUDIT_STATUS.APPROVED },
++  { key: 'rejected', label: '已拒绝', status: USER_AUDIT_STATUS.REJECTED },
++]
++const filter = ref<Filter>('pending')
++const keyword = ref('')
++const page = ref(1)
++const pageSize = 20
++const total = ref(0)
++const items = ref<UserItem[]>([])
++const loading = ref(false)
++
++const currentUserId = computed(() => authStore.user?.user_id ?? '')
++
++// Reset-password modal state.
++const resetVisible = ref(false)
++const resetTarget = ref<UserItem | null>(null)
++const newPassword = ref('')
++const resetting = ref(false)
++
++let loaded = false
++async function ensureLoaded() {
++  if (loaded || !authStore.isAdmin) return
++  loaded = true
++  await fetchList()
++}
++watch(
++  () => props.visible,
++  (v) => {
++    if (v) void ensureLoaded()
++  },
++  { immediate: true },
++)
++
++async function fetchList() {
++  loading.value = true
++  try {
++    const f = FILTERS.find((x) => x.key === filter.value)!
++    const res = await userApi.listUsers({
++      status: f.status,
++      keyword: keyword.value.trim() || null,
++      page: page.value,
++      page_size: pageSize,
++    })
++    items.value = res.items
++    total.value = res.total
++  } catch (err) {
++    toast.error(extractErrorMessage(err, '加载用户列表失败'))
++  } finally {
++    loading.value = false
++  }
++}
++
++// Debounced keyword search.
++let keywordTimer: number | undefined
++watch(keyword, () => {
++  if (keywordTimer) window.clearTimeout(keywordTimer)
++  keywordTimer = window.setTimeout(() => {
++    page.value = 1
++    void fetchList()
++  }, 300)
++})
++watch(filter, () => {
++  page.value = 1
++  void fetchList()
++})
++
++const totalPages = computed(() => Math.max(1, Math.ceil(total.value / pageSize)))
++function prevPage() {
++  if (page.value > 1) {
++    page.value--
++    void fetchList()
++  }
++}
++function nextPage() {
++  if (page.value < totalPages.value) {
++    page.value++
++    void fetchList()
++  }
++}
++
++function auditLabel(s: number): string {
++  if (s === USER_AUDIT_STATUS.PENDING) return '待审核'
++  if (s === USER_AUDIT_STATUS.APPROVED) return '已通过'
++  return '已拒绝'
++}
++function auditClass(s: number): string {
++  if (s === USER_AUDIT_STATUS.PENDING) return 'badge-warn'
++  if (s === USER_AUDIT_STATUS.APPROVED) return 'badge-on'
++  return 'badge-danger'
++}
++
++function formatDate(iso: string | null | undefined): string {
++  if (!iso) return ''
++  const d = dayjs(iso)
++  return d.isValid() ? d.format('YYYY-MM-DD HH:mm') : ''
++}
++
++const isSelf = (u: UserItem) => u.user_id === currentUserId.value
++
++async function onApprove(u: UserItem) {
++  try {
++    await userApi.approveUser(u.user_id)
++    toast.success(`已通过「${u.user_account}」`)
++    await fetchList()
++  } catch (err) {
++    toast.error(extractErrorMessage(err, '操作失败'))
++  }
++}
++async function onReject(u: UserItem) {
++  if (!window.confirm(`确定拒绝「${u.user_account}」的注册申请？`)) return
++  try {
++    await userApi.rejectUser(u.user_id)
++    toast.success(`已拒绝「${u.user_account}」`)
++    await fetchList()
++  } catch (err) {
++    toast.error(extractErrorMessage(err, '操作失败'))
++  }
++}
++async function onToggleActive(u: UserItem) {
++  const next = u.is_active === 1 ? 0 : 1
++  try {
++    await userApi.updateUser(u.user_id, { is_active: next })
++    toast.success(next === 1 ? `已启用「${u.user_account}」` : `已禁用「${u.user_account}」`)
++    await fetchList()
++  } catch (err) {
++    toast.error(extractErrorMessage(err, '操作失败'))
++  }
++}
++function openReset(u: UserItem) {
++  resetTarget.value = u
++  newPassword.value = ''
++  resetVisible.value = true
++}
++async function confirmReset() {
++  if (!resetTarget.value) return
++  if (newPassword.value.length < 6) {
++    toast.error('密码至少 6 位')
++    return
++  }
++  resetting.value = true
++  try {
++    await userApi.resetUserPassword(resetTarget.value.user_id, newPassword.value)
++    toast.success(`已重置「${resetTarget.value.user_account}」的密码`)
++    resetVisible.value = false
++  } catch (err) {
++    toast.error(extractErrorMessage(err, '重置失败'))
++  } finally {
++    resetting.value = false
++  }
++}
++</script>
++
++<template>
++  <div class="user-view">
++    <div class="view-header">
++      <div class="title-area">
++        <div class="title-icon">
++          <Icon name="user" :size="20" />
++        </div>
++        <div>
++          <div class="title">用户审核</div>
++          <div class="subtitle">审核注册申请、启停账号、重置密码（管理员）</div>
++        </div>
++      </div>
++    </div>
++
++    <div class="tabs">
++      <button
++        v-for="f in FILTERS"
++        :key="f.key"
++        class="tab"
++        :class="{ active: filter === f.key }"
++        @click="filter = f.key"
++      >
++        {{ f.label }}
++        <span v-if="f.key === filter" class="tab-count">{{ total }}</span>
++      </button>
++
++      <div class="search-box">
++        <Icon name="search" :size="14" class="search-icon" />
++        <input
++          v-model="keyword"
++          type="text"
++          placeholder="账号 / 用户名"
++          class="search-input"
++        />
++      </div>
++    </div>
++
++    <div class="view-body">
++      <div v-if="loading && !items.length" class="empty">加载中…</div>
++      <div v-else-if="!items.length" class="empty">
++        {{ filter === 'pending' ? '暂无待审核用户' : '暂无用户' }}
++      </div>
++      <div v-else class="table-wrap">
++        <table class="table">
++          <thead>
++            <tr>
++              <th>账号</th>
++              <th>用户名</th>
++              <th>角色</th>
++              <th>审核状态</th>
++              <th>启用</th>
++              <th>注册时间</th>
++              <th class="col-actions">操作</th>
++            </tr>
++          </thead>
++          <tbody>
++            <tr v-for="u in items" :key="u.user_id">
++              <td class="cell-strong">
++                {{ u.user_account }}
++                <span v-if="isSelf(u)" class="badge badge-self">我</span>
++              </td>
++              <td>{{ u.user_name }}</td>
++              <td>
++                <span class="chip">{{ u.role_name || u.role_code || '—' }}</span>
++              </td>
++              <td>
++                <span class="badge" :class="auditClass(u.audit_status)">
++                  {{ auditLabel(u.audit_status) }}
++                </span>
++              </td>
++              <td>
++                <span class="badge" :class="u.is_active === 1 ? 'badge-on' : 'badge-off'">
++                  {{ u.is_active === 1 ? '启用' : '禁用' }}
++                </span>
++              </td>
++              <td class="cell-mono">{{ formatDate(u.created_at) }}</td>
++              <td class="col-actions">
++                <template v-if="u.audit_status !== USER_AUDIT_STATUS.APPROVED">
++                  <button class="btn btn-primary btn-sm" @click="onApprove(u)">通过</button>
++                  <button
++                    v-if="u.audit_status === USER_AUDIT_STATUS.PENDING"
++                    class="btn btn-ghost btn-sm"
++                    :disabled="isSelf(u)"
++                    @click="onReject(u)"
++                  >
++                    拒绝
++                  </button>
++                </template>
++                <template v-else>
++                  <button
++                    class="btn btn-ghost btn-sm"
++                    :disabled="isSelf(u)"
++                    :title="isSelf(u) ? '不能禁用自己的账号' : ''"
++                    @click="onToggleActive(u)"
++                  >
++                    {{ u.is_active === 1 ? '禁用' : '启用' }}
++                  </button>
++                  <button class="btn btn-ghost btn-sm" @click="openReset(u)">重置密码</button>
++                </template>
++              </td>
++            </tr>
++          </tbody>
++        </table>
++      </div>
++
++      <div v-if="total > pageSize" class="pagination">
++        <button class="btn btn-ghost btn-sm" :disabled="page <= 1" @click="prevPage">上一页</button>
++        <span class="page-info">{{ page }} / {{ totalPages }}（共 {{ total }}）</span>
++        <button class="btn btn-ghost btn-sm" :disabled="page >= totalPages" @click="nextPage">下一页</button>
++      </div>
++    </div>
++
++    <Modal v-if="resetVisible" title="重置密码" width="420px" @close="resetVisible = false">
++      <p class="reset-tip" v-if="resetTarget">
++        为账号 <code class="chip">{{ resetTarget.user_account }}</code> 设置新密码
++      </p>
++      <label class="field">
++        <span class="label">新密码 <span class="req">*</span></span>
++        <input
++          v-model="newPassword"
++          type="password"
++          class="input"
++          placeholder="至少 6 位"
++          autocomplete="new-password"
++        />
++      </label>
++      <template #footer>
++        <button class="btn btn-ghost" :disabled="resetting" @click="resetVisible = false">取消</button>
++        <button class="btn btn-primary" :disabled="resetting" @click="confirmReset">
++          {{ resetting ? '提交中…' : '确认重置' }}
++        </button>
++      </template>
++    </Modal>
++  </div>
++</template>
++
++<style scoped>
++.user-view {
++  flex: 1;
++  display: flex;
++  flex-direction: column;
++  background: var(--bg-main);
++  min-width: 0;
++  overflow: hidden;
++}
++.view-header {
++  padding: 14px 24px;
++  border-bottom: 1px solid var(--border);
++}
++.title-area {
++  display: flex;
++  align-items: center;
++  gap: 12px;
++}
++.title-icon {
++  width: 36px;
++  height: 36px;
++  border-radius: 50%;
++  background: var(--accent-light);
++  display: flex;
++  align-items: center;
++  justify-content: center;
++  color: var(--accent);
++  flex-shrink: 0;
++}
++.title {
++  font-size: 16px;
++  font-weight: 600;
++  color: var(--text-primary);
++}
++.subtitle {
++  font-size: 12px;
++  color: var(--text-tertiary);
++  margin-top: 2px;
++}
++.tabs {
++  display: flex;
++  align-items: center;
++  gap: 4px;
++  padding: 0 20px;
++  border-bottom: 1px solid var(--border);
++}
++.tab {
++  display: flex;
++  align-items: center;
++  gap: 6px;
++  padding: 10px 14px;
++  font-size: 13px;
++  color: var(--text-secondary);
++  border-bottom: 2px solid transparent;
++  transition: color 0.15s, border-color 0.15s;
++  margin-bottom: -1px;
++}
++.tab:hover {
++  color: var(--text-primary);
++}
++.tab.active {
++  color: var(--accent);
++  border-bottom-color: var(--accent);
++}
++.tab-count {
++  font-size: 11px;
++  color: var(--text-tertiary);
++  background: var(--bg-input);
++  border: 1px solid var(--border);
++  border-radius: 10px;
++  padding: 0 6px;
++  min-width: 18px;
++  text-align: center;
++}
++.tab.active .tab-count {
++  color: var(--accent);
++}
++.search-box {
++  position: relative;
++  margin-left: auto;
++  margin-bottom: 6px;
++}
++.search-icon {
++  position: absolute;
++  left: 10px;
++  top: 50%;
++  transform: translateY(-50%);
++  color: var(--text-tertiary);
++  pointer-events: none;
++}
++.search-input {
++  width: 200px;
++  height: 30px;
++  padding: 0 10px 0 30px;
++  font-size: 12px;
++}
++.view-body {
++  flex: 1;
++  overflow-y: auto;
++  padding: 20px 24px;
++}
++.empty {
++  font-size: 13px;
++  color: var(--text-tertiary);
++  padding: 24px 0;
++  text-align: center;
++}
++.table-wrap {
++  border: 1px solid var(--border);
++  border-radius: 10px;
++  overflow: auto;
++  background: var(--bg-sidebar);
++}
++.table {
++  width: 100%;
++  border-collapse: collapse;
++  font-size: 13px;
++}
++.table th {
++  text-align: left;
++  font-weight: 600;
++  font-size: 12px;
++  color: var(--text-tertiary);
++  padding: 10px 12px;
++  border-bottom: 1px solid var(--border);
++  background: var(--bg-input);
++  white-space: nowrap;
++}
++.table td {
++  padding: 10px 12px;
++  border-bottom: 1px solid var(--border);
++  color: var(--text-secondary);
++  vertical-align: middle;
++}
++.table tbody tr:last-child td {
++  border-bottom: none;
++}
++.table tbody tr:hover {
++  background: var(--bg-hover);
++}
++.cell-strong {
++  color: var(--text-primary);
++  font-weight: 500;
++}
++.cell-mono {
++  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
++  font-size: 12px;
++  white-space: nowrap;
++}
++.col-actions {
++  white-space: nowrap;
++  display: flex;
++  gap: 6px;
++}
++.btn-sm {
++  padding: 4px 10px;
++  font-size: 12px;
++  border-radius: 6px;
++}
++.btn-sm:disabled {
++  opacity: 0.5;
++  cursor: not-allowed;
++}
++.chip {
++  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
++  font-size: 11px;
++  padding: 1px 7px;
++  border-radius: 6px;
++  background: var(--bg-input);
++  border: 1px solid var(--border);
++  color: var(--text-secondary);
++}
++.badge {
++  font-size: 11px;
++  padding: 1px 8px;
++  border-radius: 10px;
++  font-weight: 500;
++}
++.badge-on {
++  background: rgba(34, 197, 94, 0.15);
++  color: #16a34a;
++}
++.badge-off {
++  background: var(--bg-input);
++  color: var(--text-tertiary);
++}
++.badge-warn {
++  background: rgba(245, 158, 11, 0.15);
++  color: #d97706;
++}
++.badge-danger {
++  background: rgba(239, 68, 68, 0.15);
++  color: #dc2626;
++}
++.badge-self {
++  margin-left: 6px;
++  background: var(--accent-light);
++  color: var(--accent);
++}
++.pagination {
++  display: flex;
++  align-items: center;
++  justify-content: center;
++  gap: 12px;
++  margin-top: 16px;
++}
++.page-info {
++  font-size: 12px;
++  color: var(--text-tertiary);
++}
++/* Reset-password modal form fields */
++.reset-tip {
++  font-size: 13px;
++  color: var(--text-secondary);
++  margin: 0 0 14px;
++}
++.field {
++  display: flex;
++  flex-direction: column;
++  gap: 6px;
++}
++.label {
++  font-size: 12px;
++  color: var(--text-tertiary);
++  font-weight: 500;
++}
++.req {
++  color: var(--danger);
++}
++.input {
++  height: 36px;
++  padding: 0 12px;
++  font-size: 14px;
++}
++</style>
+diff --git a/frontend/src/components/ai/AiChat.vue b/frontend/src/components/ai/AiChat.vue
+index b9060f9..eb5710e 100644
+--- a/frontend/src/components/ai/AiChat.vue
++++ b/frontend/src/components/ai/AiChat.vue
+@@ -1,14 +1,16 @@
+ <script setup lang="ts">
+-import { ref, onMounted, nextTick, computed } from 'vue'
++import { ref, onMounted, nextTick, computed, watch } from 'vue'
+ import Icon from '@/components/Icon.vue'
+ import MarkdownView from '@/components/ai/MarkdownView.vue'
+-import { listAiConfigs, streamChat, listChatSessions, getChatMessages, deleteChatSession } from '@/api/ai'
++import { listAiConfigs, streamChat, getChatMessages } from '@/api/ai'
++import { useChatStore } from '@/stores/chat'
+ import { useAuthStore } from '@/stores/auth'
+ import { useToast } from '@/composables/useToast'
+ import { extractErrorMessage } from '@/api/client'
+-import type { AiConfig, ChatSession, SnowflakeId } from '@/types'
++import type { AiConfig, SnowflakeId } from '@/types'
+ 
+ const authStore = useAuthStore()
++const chatStore = useChatStore()
+ const toast = useToast()
+ 
+ interface ToolChip {
+@@ -26,10 +28,7 @@ interface Bubble {
+ 
+ const bubbles = ref<Bubble[]>([])
+ const input = ref('')
+-const sending = ref(false)
+ const configs = ref<AiConfig[]>([])
+-const sessions = ref<ChatSession[]>([])
+-const currentSessionId = ref<SnowflakeId | null>(null)
+ const messagesEl = ref<HTMLDivElement | null>(null)
+ 
+ const activeConfig = computed(
+@@ -40,8 +39,8 @@ const activeConfig = computed(
+ )
+ 
+ onMounted(async () => {
+-  await Promise.all([loadConfigs(), loadSessions()])
+-  if (!bubbles.value.length) {
++  await Promise.all([loadConfigs(), chatStore.loadSessions()])
++  if (!bubbles.value.length && !chatStore.currentSessionId) {
+     bubbles.value.push({
+       role: 'ai',
+       text: '你好！我是 AI 助手。可以搜索/读取/编辑你的笔记，或直接提问。',
+@@ -50,6 +49,16 @@ onMounted(async () => {
+   }
+ })
+ 
++// React to session selection or new-chat triggered from the sidebar.
++watch(() => chatStore.currentSessionId, async (id) => {
++  if (chatStore.sending) return  // Ignore onSession updates during streaming
++  if (id !== null) {
++    await loadSessionMessages(id)
++  } else {
++    bubbles.value = [{ role: 'ai', text: '开始新的对话吧。', tools: [] }]
++  }
++})
++
+ async function loadConfigs() {
+   try {
+     configs.value = await listAiConfigs()
+@@ -59,38 +68,21 @@ async function loadConfigs() {
+   }
+ }
+ 
+-async function loadSessions() {
+-  try {
+-    sessions.value = await listChatSessions()
+-  } catch (err) {
+-    sessions.value = []
+-    console.warn(extractErrorMessage(err, '加载会话列表失败'))
+-  }
+-}
+-
+ async function scrollToBottom() {
+   await nextTick()
+   if (messagesEl.value) messagesEl.value.scrollTop = messagesEl.value.scrollHeight
+ }
+ 
+-async function selectSession(id: SnowflakeId) {
+-  if (sending.value) return
+-  currentSessionId.value = id
++async function loadSessionMessages(id: SnowflakeId) {
+   bubbles.value = []
+   try {
+     const rows = await getChatMessages(id)
+-    // Reconstruct bubbles: assistant text + following tool rows become one AI bubble.
+     for (const row of rows) {
+       if (row.role === 'user') {
+         bubbles.value.push({ role: 'user', text: row.content ?? '', tools: [] })
+       } else if (row.role === 'assistant') {
+-        bubbles.value.push({
+-          role: 'ai',
+-          text: row.content ?? '',
+-          tools: [],
+-        })
++        bubbles.value.push({ role: 'ai', text: row.content ?? '', tools: [] })
+       } else if (row.role === 'tool') {
+-        // Attach tool result to the last AI bubble.
+         const last = bubbles.value[bubbles.value.length - 1]
+         const target = last && last.role === 'ai' ? last : null
+         const chip: ToolChip = {
+@@ -113,17 +105,9 @@ async function selectSession(id: SnowflakeId) {
+   }
+ }
+ 
+-function newChat() {
+-  if (sending.value) return
+-  currentSessionId.value = null
+-  bubbles.value = [
+-    { role: 'ai', text: '开始新的对话吧。', tools: [] },
+-  ]
+-}
+-
+ async function send() {
+   const text = input.value.trim()
+-  if (!text || sending.value) return
++  if (!text || chatStore.sending) return
+ 
+   if (!activeConfig.value) {
+     toast.info('未检测到可用的 AI 配置，请先在设置中添加模型与配置')
+@@ -132,24 +116,23 @@ async function send() {
+ 
+   bubbles.value.push({ role: 'user', text, tools: [] })
+   input.value = ''
+-  sending.value = true
++  chatStore.sending = true
+   const aiBubble: Bubble = { role: 'ai', text: '', tools: [] }
+   bubbles.value.push(aiBubble)
+   await scrollToBottom()
+ 
+-  // Track tool chips by id so tool_end updates the matching tool_start chip.
+   const toolIndex = new Map<string, ToolChip>()
+ 
+   try {
+     await streamChat(
+       {
+-        session_id: currentSessionId.value,
++        session_id: chatStore.currentSessionId,
+         message: text,
+         config_id: activeConfig.value.config_id,
+       },
+       {
+         onSession: (data) => {
+-          currentSessionId.value = data.session_id
++          chatStore.currentSessionId = data.session_id
+         },
+         onText: (delta) => {
+           aiBubble.text += delta
+@@ -177,8 +160,7 @@ async function send() {
+           }
+         },
+         onDone: () => {
+-          // Refresh session list so the new/updated session shows with its title.
+-          void loadSessions()
++          void chatStore.loadSessions()
+         },
+         onError: (message) => {
+           if (!aiBubble.text) aiBubble.text = '（对话出错）'
+@@ -189,23 +171,11 @@ async function send() {
+   } catch (err) {
+     toast.error(extractErrorMessage(err, '对话失败'))
+   } finally {
+-    sending.value = false
++    chatStore.sending = false
+     await scrollToBottom()
+   }
+ }
+ 
+-async function removeSession(id: SnowflakeId) {
+-  if (!window.confirm('删除该会话？')) return
+-  try {
+-    await deleteChatSession(id)
+-    sessions.value = sessions.value.filter((s) => s.session_id !== id)
+-    if (currentSessionId.value === id) newChat()
+-    toast.success('已删除')
+-  } catch (err) {
+-    toast.error(extractErrorMessage(err, '删除失败'))
+-  }
+-}
+-
+ function onKeydown(e: KeyboardEvent) {
+   if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+     e.preventDefault()
+@@ -216,190 +186,78 @@ function onKeydown(e: KeyboardEvent) {
+ 
+ <template>
+   <div class="chat-view">
+-    <div class="chat-sidebar">
+-      <button class="new-chat-btn" @click="newChat">
+-        <Icon name="plus" :size="16" />
+-        <span>新对话</span>
+-      </button>
+-      <div class="session-list">
+-        <div v-if="!sessions.length" class="session-empty">暂无历史会话</div>
+-        <div
+-          v-for="s in sessions"
+-          :key="s.session_id"
+-          class="session-item"
+-          :class="{ active: currentSessionId === s.session_id }"
+-          @click="selectSession(s.session_id)"
+-        >
+-          <Icon name="chat" :size="14" class="session-icon" />
+-          <span class="session-title">{{ s.session_title || '新对话' }}</span>
+-          <button class="session-del" title="删除" @click.stop="removeSession(s.session_id)">
+-            <Icon name="trash" :size="13" />
+-          </button>
++    <div class="chat-header">
++      <div class="chat-header-icon">
++        <Icon name="robot" :size="20" />
++      </div>
++      <div class="chat-header-info">
++        <div class="chat-header-title">AI 助手</div>
++        <div class="chat-header-status">
++          <template v-if="activeConfig">
++            {{ activeConfig.config_name }} · {{ activeConfig.model || '未知模型' }}
++          </template>
++          <template v-else>未配置可用模型</template>
+         </div>
+       </div>
+     </div>
+ 
+-    <div class="chat-main">
+-      <div class="chat-header">
+-        <div class="chat-header-icon">
+-          <Icon name="robot" :size="20" />
+-        </div>
+-        <div class="chat-header-info">
+-          <div class="chat-header-title">AI 助手</div>
+-          <div class="chat-header-status">
+-            <template v-if="activeConfig">
+-              {{ activeConfig.config_name }} · {{ activeConfig.model || '未知模型' }}
+-            </template>
+-            <template v-else>未配置可用模型</template>
+-          </div>
++    <div ref="messagesEl" class="chat-messages">
++      <div
++        v-for="(msg, i) in bubbles"
++        :key="i"
++        class="chat-message"
++        :class="msg.role"
++      >
++        <div class="chat-avatar">
++          {{ msg.role === 'user' ? authStore.avatarChar : 'AI' }}
+         </div>
+-      </div>
+-
+-      <div ref="messagesEl" class="chat-messages">
+-        <div
+-          v-for="(msg, i) in bubbles"
+-          :key="i"
+-          class="chat-message"
+-          :class="msg.role"
+-        >
+-          <div class="chat-avatar">
+-            {{ msg.role === 'user' ? authStore.avatarChar : 'AI' }}
+-          </div>
+-          <div class="chat-content">
+-            <div v-if="msg.tools.length" class="tool-chips">
+-              <div
+-                v-for="(t, j) in msg.tools"
+-                :key="j"
+-                class="tool-chip"
+-                :class="{ error: t.isError, pending: t.pending }"
+-              >
+-                <Icon name="tool" :size="12" />
+-                <span class="tool-name">{{ t.name }}</span>
+-                <span v-if="t.pending" class="tool-status">执行中…</span>
+-                <span v-else-if="t.isError" class="tool-status">失败</span>
+-                <span v-else class="tool-status">完成</span>
+-              </div>
++        <div class="chat-content">
++          <div v-if="msg.tools.length" class="tool-chips">
++            <div
++              v-for="(t, j) in msg.tools"
++              :key="j"
++              class="tool-chip"
++              :class="{ error: t.isError, pending: t.pending }"
++            >
++              <Icon name="tool" :size="12" />
++              <span class="tool-name">{{ t.name }}</span>
++              <span v-if="t.pending" class="tool-status">执行中…</span>
++              <span v-else-if="t.isError" class="tool-status">失败</span>
++              <span v-else class="tool-status">完成</span>
+             </div>
+-            <MarkdownView
+-              v-if="msg.text"
+-              class="chat-bubble"
+-              :content="msg.text"
+-              :plain="msg.role === 'user'"
+-              :streaming="sending && i === bubbles.length - 1 && msg.role === 'ai'"
+-            />
+-            <div v-else-if="sending && i === bubbles.length - 1" class="chat-bubble typing">思考中…</div>
+           </div>
++          <MarkdownView
++            v-if="msg.text"
++            class="chat-bubble"
++            :content="msg.text"
++            :plain="msg.role === 'user'"
++            :streaming="chatStore.sending && i === bubbles.length - 1 && msg.role === 'ai'"
++          />
++          <div v-else-if="chatStore.sending && i === bubbles.length - 1" class="chat-bubble typing">思考中…</div>
+         </div>
+       </div>
++    </div>
+ 
+-      <div class="chat-input-area">
+-        <textarea
+-          v-model="input"
+-          class="chat-textarea"
+-          placeholder="向 AI 提问…（Ctrl+Enter 发送）"
+-          @keydown="onKeydown"
+-        />
+-        <button class="chat-send-btn" :disabled="!input.trim() || sending" @click="send">
+-          <Icon name="send" :size="18" />
+-        </button>
+-      </div>
++    <div class="chat-input-area">
++      <textarea
++        v-model="input"
++        class="chat-textarea"
++        placeholder="向 AI 提问…（Ctrl+Enter 发送）"
++        @keydown="onKeydown"
++      />
++      <button class="chat-send-btn" :disabled="!input.trim() || chatStore.sending" @click="send">
++        <Icon name="send" :size="18" />
++      </button>
+     </div>
+   </div>
+ </template>
+ 
+ <style scoped>
+ .chat-view {
+-  flex: 1;
+-  display: flex;
+-  background: var(--bg-main);
+-  min-width: 0;
+-}
+-.chat-sidebar {
+-  width: 220px;
+-  flex-shrink: 0;
+-  border-right: 1px solid var(--border);
+-  display: flex;
+-  flex-direction: column;
+-  padding: 12px;
+-  gap: 10px;
+-  overflow: hidden;
+-}
+-.new-chat-btn {
+-  display: flex;
+-  align-items: center;
+-  gap: 6px;
+-  padding: 8px 12px;
+-  border-radius: 8px;
+-  background: var(--accent);
+-  color: #fff;
+-  font-size: 13px;
+-  font-weight: 500;
+-}
+-.new-chat-btn:hover {
+-  background: var(--accent-hover);
+-}
+-.session-list {
+-  flex: 1;
+-  overflow-y: auto;
+-  display: flex;
+-  flex-direction: column;
+-  gap: 2px;
+-}
+-.session-empty {
+-  font-size: 12px;
+-  color: var(--text-tertiary);
+-  padding: 12px 8px;
+-  text-align: center;
+-}
+-.session-item {
+-  display: flex;
+-  align-items: center;
+-  gap: 6px;
+-  padding: 7px 10px;
+-  border-radius: 8px;
+-  cursor: pointer;
+-  font-size: 13px;
+-  color: var(--text-secondary);
+-}
+-.session-item:hover {
+-  background: var(--bg-hover);
+-}
+-.session-item.active {
+-  background: var(--accent-light);
+-  color: var(--text-primary);
+-}
+-.session-icon {
+-  color: var(--text-tertiary);
+-  flex-shrink: 0;
+-}
+-.session-title {
+-  flex: 1;
+-  overflow: hidden;
+-  text-overflow: ellipsis;
+-  white-space: nowrap;
+-}
+-.session-del {
+-  opacity: 0;
+-  width: 22px;
+-  height: 22px;
+-  display: flex;
+-  align-items: center;
+-  justify-content: center;
+-  border-radius: 5px;
+-  color: var(--text-tertiary);
+-  flex-shrink: 0;
+-}
+-.session-item:hover .session-del {
+-  opacity: 1;
+-}
+-.session-del:hover {
+-  background: var(--bg-input);
+-  color: #dc2626;
+-}
+-.chat-main {
+   flex: 1;
+   display: flex;
+   flex-direction: column;
++  background: var(--bg-main);
+   min-width: 0;
+ }
+ .chat-header {
+diff --git a/frontend/src/components/ai/AiConfigFormModal.vue b/frontend/src/components/ai/AiConfigFormModal.vue
+index 35d9ba8..1d4a7dd 100644
+--- a/frontend/src/components/ai/AiConfigFormModal.vue
++++ b/frontend/src/components/ai/AiConfigFormModal.vue
+@@ -139,7 +139,7 @@ async function submit() {
+ <template>
+   <Modal v-if="visible" :title="titleText" width="560px" @close="emit('update:visible', false)">
+     <div class="form">
+-      <div class="row">
++      <div class="row flex flex-col md:flex-row gap-3">
+         <label class="field">
+           <span class="label">配置名称 <span class="req">*</span></span>
+           <input v-model="configName" class="input" placeholder="如：默认对话" maxlength="100" />
+@@ -182,7 +182,7 @@ async function submit() {
+         <div v-else class="hint">暂无可用工具</div>
+       </div>
+ 
+-      <div class="row">
++      <div class="row flex flex-col md:flex-row gap-3">
+         <label class="field">
+           <span class="label">Temperature (0-2)</span>
+           <input v-model.number="temperature" type="number" min="0" max="2" step="0.1" class="input" placeholder="默认" />
+@@ -228,10 +228,6 @@ async function submit() {
+   flex-direction: column;
+   gap: 14px;
+ }
+-.row {
+-  display: flex;
+-  gap: 12px;
+-}
+ .row .field {
+   flex: 1;
+ }
+diff --git a/frontend/src/components/ai/AiModelFormModal.vue b/frontend/src/components/ai/AiModelFormModal.vue
+index 42c8f74..a481ee1 100644
+--- a/frontend/src/components/ai/AiModelFormModal.vue
++++ b/frontend/src/components/ai/AiModelFormModal.vue
+@@ -147,7 +147,7 @@ async function submit() {
+         <input v-model="name" class="input" placeholder="如：DeepSeek 官方" maxlength="100" />
+       </label>
+ 
+-      <div class="row">
++      <div class="row flex flex-col md:flex-row gap-3">
+         <label class="field">
+           <span class="label">接口格式 <span class="req">*</span></span>
+           <select v-model="apiFormat" class="input">
+@@ -170,7 +170,7 @@ async function submit() {
+         <input v-model="apiKey" type="password" class="input" placeholder="sk-..." maxlength="500" />
+       </label>
+ 
+-      <div class="row">
++      <div class="row flex flex-col md:flex-row gap-3">
+         <label class="field">
+           <span class="label">最大 Tokens</span>
+           <input v-model.number="maxTokens" type="number" min="1" class="input" />
+@@ -220,10 +220,6 @@ async function submit() {
+   flex-direction: column;
+   gap: 14px;
+ }
+-.row {
+-  display: flex;
+-  gap: 12px;
+-}
+ .row .field {
+   flex: 1;
+ }
+diff --git a/frontend/src/components/ai/AiSettings.vue b/frontend/src/components/ai/AiSettings.vue
+index 93c27bc..134d441 100644
+--- a/frontend/src/components/ai/AiSettings.vue
++++ b/frontend/src/components/ai/AiSettings.vue
+@@ -500,7 +500,7 @@ function paramLabel(v: number | null): string {
+ }
+ .tool-cards {
+   display: grid;
+-  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
++  grid-template-columns: repeat(auto-fill, minmax(min(100%, 320px), 1fr));
+   gap: 14px;
+ }
+ .tool-card {
+diff --git a/frontend/src/components/ai/MarkdownView.vue b/frontend/src/components/ai/MarkdownView.vue
+index ddba0a5..eff8c85 100644
+--- a/frontend/src/components/ai/MarkdownView.vue
++++ b/frontend/src/components/ai/MarkdownView.vue
+@@ -37,7 +37,7 @@ async function render() {
+     cdn: `${import.meta.env.BASE_URL}vditor`,
+     lang: 'zh_CN',
+     icon: 'ant',
+-    hljs: { lineNumber: true, style: 'github' },
++    hljs: { lineNumber: true, style: theme.value === 'dark' ? 'github-dark' : 'github' },
+     anchor: 0,
+   })
+ }
+@@ -110,6 +110,9 @@ onBeforeUnmount(() => {
+   background: transparent;
+   padding: 0;
+ }
++[data-theme="dark"] .md-view :deep(.vditor-preview) {
++  color: var(--text-primary);
++}
+ .md-view :deep(.vditor-preview p) {
+   margin: 0 0 8px;
+   line-height: 1.65;
+diff --git a/frontend/src/components/layout/AppSidebar.vue b/frontend/src/components/layout/AppSidebar.vue
+index 52cb684..8825b58 100644
+--- a/frontend/src/components/layout/AppSidebar.vue
++++ b/frontend/src/components/layout/AppSidebar.vue
+@@ -1,17 +1,21 @@
+ <script setup lang="ts">
+-import { ref, watch } from 'vue'
++import { ref, watch, computed } from 'vue'
+ import dayjs from 'dayjs'
+ import Icon from '@/components/Icon.vue'
+ import NoteTree from '@/components/NoteTree.vue'
+ import { useNoteStore } from '@/stores/note'
+ import { useAuthStore } from '@/stores/auth'
+ import { useTheme } from '@/composables/useTheme'
++import { useChatStore } from '@/stores/chat'
++import { deleteChatSession } from '@/api/ai'
++import { useToast } from '@/composables/useToast'
++import { extractErrorMessage } from '@/api/client'
+ import type { SnowflakeId } from '@/types'
+ 
+ const props = defineProps<{
+   selectedCategoryId: SnowflakeId | null
+   selectedNoteId: SnowflakeId | null
+-  activeView: 'notes' | 'chat' | 'settings'
++  activeView: 'notes' | 'chat' | 'settings' | 'users'
+   keyword: string
+ }>()
+ 
+@@ -27,12 +31,38 @@ const emit = defineEmits<{
+   remove: [node: import('@/types').CategoryNode]
+   'select-chat': []
+   'select-settings': []
++  'select-users': []
+   logout: []
+ }>()
+ 
+ const noteStore = useNoteStore()
+ const authStore = useAuthStore()
+ const { theme, toggle } = useTheme()
++const chatStore = useChatStore()
++const toast = useToast()
++
++const chatSessions = computed(() => chatStore.sessions)
++
++function selectChatSession(id: SnowflakeId) {
++  chatStore.setCurrentSession(id)
++  emit('select-chat')
++}
++
++function startNewChat() {
++  chatStore.startNewChat()
++  emit('select-chat')
++}
++
++async function removeChatSession(id: SnowflakeId) {
++  if (!window.confirm('删除该会话？')) return
++  try {
++    await deleteChatSession(id)
++    chatStore.removeSession(id)
++    toast.success('已删除')
++  } catch (err) {
++    toast.error(extractErrorMessage(err, '删除失败'))
++  }
++}
+ 
+ // Debounced search input — drives the combined tree filter in AppView.
+ const localKeyword = ref(props.keyword)
+@@ -69,18 +99,24 @@ const uncategorized = () => noteStore.tree?.uncategorized ?? []
+ 
+     <!-- Actions -->
+     <div class="sidebar-actions">
+-      <button class="btn btn-primary" @click="emit('new-note')">
++      <button v-if="activeView === 'chat'" class="btn btn-primary btn-new-chat" @click="startNewChat">
+         <Icon name="plus" :size="14" :stroke-width="2.2" />
+-        新建笔记
+-      </button>
+-      <button class="btn btn-ghost" @click="emit('new-category')">
+-        <Icon name="folder-plus" :size="14" :stroke-width="2.2" />
+-        分类
++        新对话
+       </button>
++      <template v-else>
++        <button class="btn btn-primary" @click="emit('new-note')">
++          <Icon name="plus" :size="14" :stroke-width="2.2" />
++          新建笔记
++        </button>
++        <button class="btn btn-ghost" @click="emit('new-category')">
++          <Icon name="folder-plus" :size="14" :stroke-width="2.2" />
++          分类
++        </button>
++      </template>
+     </div>
+ 
+-    <!-- Search -->
+-    <div class="sidebar-search">
++    <!-- Search (hidden in chat mode) -->
++    <div v-if="activeView !== 'chat'" class="sidebar-search">
+       <Icon name="search" :size="14" class="search-icon" />
+       <input
+         v-model="localKeyword"
+@@ -90,8 +126,26 @@ const uncategorized = () => noteStore.tree?.uncategorized ?? []
+       />
+     </div>
+ 
+-    <!-- Combined category + note tree -->
+-    <div class="sidebar-content">
++    <!-- Chat mode: history session list -->
++    <div v-if="activeView === 'chat'" class="sidebar-content">
++      <div v-if="!chatSessions.length" class="empty-hint">暂无历史会话</div>
++      <div
++        v-for="s in chatSessions"
++        :key="s.session_id"
++        class="session-item"
++        :class="{ active: chatStore.currentSessionId === s.session_id }"
++        @click="selectChatSession(s.session_id)"
++      >
++        <Icon name="chat" :size="14" class="session-icon" />
++        <span class="session-label">{{ s.session_title || '新对话' }}</span>
++        <button class="session-del" title="删除" @click.stop="removeChatSession(s.session_id)">
++          <Icon name="trash" :size="13" />
++        </button>
++      </div>
++    </div>
++
++    <!-- Notes mode: combined category + note tree -->
++    <div v-else class="sidebar-content">
+       <div v-if="noteStore.treeLoading && !noteStore.tree" class="loading-hint">
+         加载中…
+       </div>
+@@ -136,8 +190,10 @@ const uncategorized = () => noteStore.tree?.uncategorized ?? []
+           </div>
+         </div>
+       </template>
++    </div>
+ 
+-      <!-- Virtual "AI 对话" entry -->
++    <!-- AI navigation (always visible) -->
++    <div class="sidebar-ai-nav">
+       <div class="tree-section-title ai-title">
+         <span>AI 助手</span>
+       </div>
+@@ -160,6 +216,16 @@ const uncategorized = () => noteStore.tree?.uncategorized ?? []
+         <Icon name="settings" :size="16" class="row-icon" />
+         <span class="tree-label">AI 设置</span>
+       </div>
++      <div
++        v-if="authStore.isAdmin"
++        class="tree-row ai-row"
++        :class="{ active: activeView === 'users' }"
++        @click="emit('select-users')"
++      >
++        <span class="tree-toggle" style="visibility: hidden"></span>
++        <Icon name="user" :size="16" class="row-icon" />
++        <span class="tree-label">用户审核</span>
++      </div>
+     </div>
+ 
+     <!-- Footer -->
+@@ -183,12 +249,10 @@ const uncategorized = () => noteStore.tree?.uncategorized ?? []
+ 
+ <style scoped>
+ .sidebar {
+-  width: var(--sidebar-width);
+   background: var(--bg-sidebar);
+   border-right: 1px solid var(--border);
+   display: flex;
+   flex-direction: column;
+-  flex-shrink: 0;
+   transition: background 0.3s, border-color 0.3s;
+ }
+ .sidebar-header {
+@@ -215,6 +279,9 @@ const uncategorized = () => noteStore.tree?.uncategorized ?? []
+   gap: 8px;
+   padding: 12px 16px 8px;
+ }
++.btn-new-chat {
++  flex: 1;
++}
+ .sidebar-search {
+   position: relative;
+   padding: 0 16px 8px;
+@@ -236,7 +303,7 @@ const uncategorized = () => noteStore.tree?.uncategorized ?? []
+ .sidebar-content {
+   flex: 1;
+   overflow-y: auto;
+-  padding: 8px 10px;
++  padding: 10px 12px;
+ }
+ .tree-section-title {
+   font-size: 11px;
+@@ -247,7 +314,7 @@ const uncategorized = () => noteStore.tree?.uncategorized ?? []
+   padding: 12px 6px 6px;
+ }
+ .ai-title {
+-  margin-top: 8px;
++  margin-top: 0;
+ }
+ .loading-hint,
+ .empty-hint {
+@@ -256,6 +323,61 @@ const uncategorized = () => noteStore.tree?.uncategorized ?? []
+   padding: 8px 10px;
+ }
+ 
++/* Chat history session rows */
++.session-item {
++  display: flex;
++  align-items: center;
++  gap: 6px;
++  padding: 6px 8px;
++  border-radius: 6px;
++  cursor: pointer;
++  color: var(--text-secondary);
++  transition: background 0.15s, color 0.15s;
++}
++.session-item:hover {
++  background: var(--bg-hover);
++  color: var(--text-primary);
++}
++.session-item.active {
++  background: var(--bg-active);
++  color: var(--text-accent);
++}
++.session-icon {
++  flex-shrink: 0;
++  opacity: 0.6;
++}
++.session-label {
++  flex: 1;
++  font-size: 13px;
++  white-space: nowrap;
++  overflow: hidden;
++  text-overflow: ellipsis;
++}
++.session-del {
++  opacity: 0;
++  width: 20px;
++  height: 20px;
++  display: flex;
++  align-items: center;
++  justify-content: center;
++  border-radius: 4px;
++  color: var(--text-tertiary);
++  flex-shrink: 0;
++}
++.session-item:hover .session-del {
++  opacity: 1;
++}
++.session-del:hover {
++  background: var(--bg-input);
++  color: #dc2626;
++}
++
++/* AI navigation block (always visible, sits between content and footer) */
++.sidebar-ai-nav {
++  padding: 0 12px 4px;
++  border-top: 1px solid var(--border);
++}
++
+ /* Uncategorized group reuses the tree row styling. */
+ .uncategorized-group {
+   margin-top: 4px;
+diff --git a/frontend/src/components/note/NoteAiDrawer.vue b/frontend/src/components/note/NoteAiDrawer.vue
+index 6a4a6e1..05b93d1 100644
+--- a/frontend/src/components/note/NoteAiDrawer.vue
++++ b/frontend/src/components/note/NoteAiDrawer.vue
+@@ -238,13 +238,16 @@ function onKeydown(e: KeyboardEvent) {
+ </script>
+ 
+ <template>
+-  <aside class="note-ai-drawer" :class="{ open: visible }">
++  <aside
++    v-show="visible"
++    class="note-ai-drawer flex flex-col bg-[var(--bg-main)] border-l border-[var(--border)] fixed inset-0 z-50 w-full md:static md:z-auto md:w-[420px] md:flex-shrink-0"
++  >
+     <header class="drawer-header">
+       <div class="drawer-title-wrap">
+         <div class="drawer-title-icon"><Icon name="robot" :size="16" /></div>
+         <div class="drawer-title-text">
+           <div class="drawer-title">笔记 AI 助手</div>
+-          <div class="drawer-sub" :title="noteTitle || ''">{{ noteTitle || '当前笔记' }}</div>
++          <div class="drawer-sub max-w-[min(240px,60vw)]" :title="noteTitle || ''">{{ noteTitle || '当前笔记' }}</div>
+         </div>
+       </div>
+       <div class="drawer-actions">
+@@ -303,25 +306,7 @@ function onKeydown(e: KeyboardEvent) {
+ 
+ <style scoped>
+ .note-ai-drawer {
+-  position: absolute;
+-  top: 0;
+-  right: 0;
+-  bottom: 0;
+-  width: 420px;
+-  max-width: 90%;
+   background: var(--bg-main);
+-  border-left: 1px solid var(--border);
+-  box-shadow: -8px 0 24px rgba(0, 0, 0, 0.08);
+-  display: flex;
+-  flex-direction: column;
+-  z-index: 30;
+-  transform: translateX(100%);
+-  transition: transform 0.25s ease;
+-  pointer-events: none;
+-}
+-.note-ai-drawer.open {
+-  transform: translateX(0);
+-  pointer-events: auto;
+ }
+ .drawer-header {
+   display: flex;
+@@ -362,7 +347,6 @@ function onKeydown(e: KeyboardEvent) {
+   overflow: hidden;
+   text-overflow: ellipsis;
+   white-space: nowrap;
+-  max-width: 240px;
+ }
+ .drawer-actions {
+   display: flex;
+diff --git a/frontend/src/components/note/NoteEditor.vue b/frontend/src/components/note/NoteEditor.vue
+index eaa8128..25308c4 100644
+--- a/frontend/src/components/note/NoteEditor.vue
++++ b/frontend/src/components/note/NoteEditor.vue
+@@ -62,6 +62,10 @@ function vditorTheme(): 'dark' | 'classic' {
+   return theme.value === 'dark' ? 'dark' : 'classic'
+ }
+ 
++function hljsStyle(): string {
++  return theme.value === 'dark' ? 'github-dark' : 'github'
++}
++
+ // Vditor toolbar: curated set.
+ const VDITOR_TOOLBAR: string[] = [
+   'emoji', 'headings', 'bold', 'italic', 'strike', '|',
+@@ -102,7 +106,7 @@ function buildVditorOptions(initialValue: string): ConstructorParameters<typeof
+     toolbar: VDITOR_TOOLBAR,
+     toolbarConfig: { pin: true },
+     preview: {
+-      hljs: { lineNumber: true, style: 'github' },
++      hljs: { lineNumber: true, style: hljsStyle() },
+     },
+     upload: {
+       // Custom upload handler — bypasses Vditor's own XHR so we use the app's
+@@ -172,7 +176,7 @@ async function renderPreview() {
+     cdn: `${import.meta.env.BASE_URL}vditor`,
+     lang: 'zh_CN',
+     icon: 'ant',
+-    hljs: { lineNumber: true, style: 'github' },
++    hljs: { lineNumber: true, style: hljsStyle() },
+     anchor: 0,
+   })
+ }
+@@ -400,14 +404,14 @@ onBeforeUnmount(() => {
+     </div>
+ 
+     <template v-else>
+-      <div class="editor-toolbar">
++      <div class="editor-toolbar py-3.5 px-4 md:py-4 md:px-8">
+         <div class="toolbar-group">
+           <span class="editor-mode-label" :class="{ 'mode-edit': mode === 'edit' }">
+             {{ mode === 'edit' ? '编辑模式' : '预览模式' }}
+           </span>
+         </div>
+         <div class="toolbar-group">
+-          <span class="save-status">{{ saving ? '保存中…' : '已保存' }}</span>
++          <span class="save-status hidden md:inline">{{ saving ? '保存中…' : '已保存' }}</span>
+           <button
+             v-if="mode === 'preview'"
+             class="toolbar-btn primary-btn"
+@@ -415,7 +419,7 @@ onBeforeUnmount(() => {
+             @click="switchToEdit"
+           >
+             <Icon name="edit" :size="16" />
+-            <span class="btn-text">编辑</span>
++            <span class="btn-text hidden md:inline">编辑</span>
+           </button>
+           <button
+             v-else
+@@ -424,7 +428,7 @@ onBeforeUnmount(() => {
+             @click="switchToPreview"
+           >
+             <Icon name="book" :size="16" />
+-            <span class="btn-text">完成</span>
++            <span class="btn-text hidden md:inline">完成</span>
+           </button>
+           <button
+             class="toolbar-btn"
+@@ -451,91 +455,95 @@ onBeforeUnmount(() => {
+         </div>
+       </div>
+ 
+-      <!-- Read-only preview (default when opening a note) -->
+-      <div v-show="mode === 'preview'" class="editor-body preview-body">
+-        <h1 class="preview-title">{{ title || '无标题' }}</h1>
+-
+-        <div class="editor-meta-bar">
+-          <span class="editor-meta-item">
+-            <Icon name="calendar" :size="13" />
+-            {{ updatedLabel }}
+-          </span>
+-          <span class="editor-meta-item">
+-            <Icon name="folder" :size="13" />
+-            {{ categoryName }}
+-          </span>
+-          <span class="editor-meta-item">
+-            <Icon name="file-text" :size="13" />
+-            {{ wordCount }} 字
+-          </span>
+-        </div>
+-
+-        <div v-if="(note.note_tags ?? []).length" class="tags-row preview-tags">
+-          <Icon name="tag" :size="14" class="tags-icon" />
+-          <span v-for="t in note.note_tags ?? []" :key="t" class="tag-chip">{{ t }}</span>
+-        </div>
+-
+-        <div class="preview-content-wrap">
+-          <div ref="previewRef" class="preview-content" />
+-          <div v-if="!content" class="preview-empty">
+-            <Icon name="file-text" :size="36" />
+-            <p>这篇笔记还是空的，点击「编辑」开始写作</p>
++      <div class="editor-workspace">
++        <!-- Read-only preview (default when opening a note) -->
++        <div v-show="mode === 'preview'" class="editor-body preview-body p-5 md:py-6 md:px-8">
++          <h1 class="preview-title">{{ title || '无标题' }}</h1>
++
++          <div class="editor-meta-bar">
++            <span class="editor-meta-item">
++              <Icon name="calendar" :size="13" />
++              {{ updatedLabel }}
++            </span>
++            <span class="editor-meta-item">
++              <Icon name="folder" :size="13" />
++              {{ categoryName }}
++            </span>
++            <span class="editor-meta-item">
++              <Icon name="file-text" :size="13" />
++              {{ wordCount }} 字
++            </span>
+           </div>
+-        </div>
+-      </div>
+ 
+-      <!-- Edit mode (Vditor) -->
+-      <div v-show="mode === 'edit'" class="editor-body">
+-        <input
+-          v-model="title"
+-          class="editor-title-input"
+-          placeholder="笔记标题"
+-          @input="scheduleSave"
+-        />
++          <div v-if="(note.note_tags ?? []).length" class="tags-row preview-tags">
++            <Icon name="tag" :size="14" class="tags-icon" />
++            <span v-for="t in note.note_tags ?? []" :key="t" class="tag-chip">{{ t }}</span>
++          </div>
+ 
+-        <div class="editor-meta-bar">
+-          <span class="editor-meta-item">
+-            <Icon name="calendar" :size="13" />
+-            {{ updatedLabel }}
+-          </span>
+-          <span class="editor-meta-item">
+-            <Icon name="folder" :size="13" />
+-            {{ categoryName }}
+-          </span>
+-          <span class="editor-meta-item">
+-            <Icon name="file-text" :size="13" />
+-            {{ wordCount }} 字
+-          </span>
++          <div class="preview-content-wrap">
++            <div ref="previewRef" class="preview-content" />
++            <div v-if="!content" class="preview-empty">
++              <Icon name="file-text" :size="36" />
++              <p>这篇笔记还是空的，点击「编辑」开始写作</p>
++            </div>
++          </div>
+         </div>
+ 
+-        <div class="tags-row">
+-          <Icon name="tag" :size="14" class="tags-icon" />
++        <!-- Edit mode (Vditor) -->
++        <div v-show="mode === 'edit'" class="editor-body p-5 md:py-6 md:px-8">
+           <input
+-            v-model="tagsStr"
+-            class="tags-input"
+-            placeholder="标签，用逗号分隔"
++            v-model="title"
++            class="editor-title-input"
++            placeholder="笔记标题"
+             @input="scheduleSave"
+           />
+-        </div>
+ 
+-        <div class="vditor-wrap">
+-          <div ref="vditorRef" class="vditor-host" />
+-          <div v-if="!vditorReady" class="vditor-loading">编辑器加载中…</div>
++          <div class="editor-meta-bar">
++            <span class="editor-meta-item">
++              <Icon name="calendar" :size="13" />
++              {{ updatedLabel }}
++            </span>
++            <span class="editor-meta-item">
++              <Icon name="folder" :size="13" />
++              {{ categoryName }}
++            </span>
++            <span class="editor-meta-item">
++              <Icon name="file-text" :size="13" />
++              {{ wordCount }} 字
++            </span>
++          </div>
++
++          <div class="tags-row">
++            <Icon name="tag" :size="14" class="tags-icon" />
++            <input
++              v-model="tagsStr"
++              class="tags-input"
++              placeholder="标签，用逗号分隔"
++              @input="scheduleSave"
++            />
++          </div>
++
++          <div class="vditor-wrap">
++            <div ref="vditorRef" class="vditor-host" />
++            <div v-if="!vditorReady" class="vditor-loading">编辑器加载中…</div>
++          </div>
+         </div>
++
++        <NoteAiDrawer
++          v-model:visible="aiVisible"
++          :note-id="note.note_id"
++          :note-title="title || note.note_title || '无标题'"
++          @note-changed="onAiNoteChanged"
++        />
+       </div>
+ 
+       <NoteHistoryDrawer
+         v-model:visible="historyVisible"
+         :note-id="note.note_id"
++        :current-content="note.note_content"
++        :current-title="note.note_title"
+         @rolled-back="onRolledBack"
+       />
+-
+-      <NoteAiDrawer
+-        v-model:visible="aiVisible"
+-        :note-id="note.note_id"
+-        :note-title="title || note.note_title || '无标题'"
+-        @note-changed="onAiNoteChanged"
+-      />
+     </template>
+   </div>
+ </template>
+@@ -548,7 +556,15 @@ onBeforeUnmount(() => {
+   flex-direction: column;
+   min-width: 0;
+   min-height: 0;
+-  position: relative;
++}
++.editor-workspace {
++  flex: 1;
++  display: flex;
++  flex-direction: row;
++  min-height: 0;
++  overflow: hidden;
++  /* Breathing room between the toolbar and the note body. */
++  padding-top: 80px;
+ }
+ .empty-state {
+   flex: 1;
+@@ -569,7 +585,6 @@ onBeforeUnmount(() => {
+   display: flex;
+   align-items: center;
+   justify-content: space-between;
+-  padding: 10px 20px;
+   border-bottom: 1px solid var(--border);
+   gap: 12px;
+ }
+@@ -614,7 +629,6 @@ onBeforeUnmount(() => {
+ .editor-body {
+   flex: 1;
+   overflow-y: auto;
+-  padding: 20px 24px;
+   display: flex;
+   flex-direction: column;
+   /* Allow flex children (vditor-wrap) to shrink so vditor can fill height
+@@ -685,6 +699,14 @@ onBeforeUnmount(() => {
+   border: 1px solid var(--border);
+   height: 100%;
+ }
++/* Vditor's dark theme CSS applies its own text colors for the editor area,
++   but some content falls through to inherited colors — ensure base readability. */
++[data-theme="dark"] .vditor-host :deep(.vditor) {
++  color-scheme: dark;
++}
++[data-theme="dark"] .vditor-host :deep(.vditor-ir) {
++  color: var(--text-primary);
++}
+ .vditor-loading {
+   position: absolute;
+   inset: 0;
+@@ -718,7 +740,14 @@ onBeforeUnmount(() => {
+ }
+ /* ---- Preview mode ---- */
+ .preview-body {
+-  align-items: stretch;
++  /* Center the article (title/meta/tags/body) in a comfortable reading column
++     instead of spanning the full editor width — matches the framed feel of
++     edit mode and keeps line lengths readable on wide screens. */
++  align-items: center;
++}
++.preview-body > * {
++  width: 100%;
++  max-width: var(--reading-width);
+ }
+ .preview-title {
+   font-size: 26px;
+@@ -753,6 +782,11 @@ onBeforeUnmount(() => {
+ .preview-content :deep(.vditor-preview) {
+   background: transparent;
+ }
++/* Ensure readable text contrast in dark mode — Vditor's content theme
++   (mode: 'dark') sets many but not all text colors; this catches the rest. */
++[data-theme="dark"] .preview-content :deep(.vditor-preview) {
++  color: var(--text-primary);
++}
+ .preview-empty {
+   position: absolute;
+   inset: 0;
+diff --git a/frontend/src/components/note/NoteHistoryDrawer.vue b/frontend/src/components/note/NoteHistoryDrawer.vue
+index b9e9f2a..d6a26b7 100644
+--- a/frontend/src/components/note/NoteHistoryDrawer.vue
++++ b/frontend/src/components/note/NoteHistoryDrawer.vue
+@@ -1,10 +1,11 @@
+ <script setup lang="ts">
+-import { ref, watch } from 'vue'
++import { ref, watch, computed } from 'vue'
+ import dayjs from 'dayjs'
+ import Modal from '@/components/Modal.vue'
+ import Icon from '@/components/Icon.vue'
+ import { useToast } from '@/composables/useToast'
+ import { listNoteHistories, getNoteHistory, rollbackNote } from '@/api/note'
++import { computeDiff } from '@/utils/diff'
+ import {
+   NOTE_HISTORY_CHANGE_TYPE,
+   NOTE_HISTORY_CHANGE_SOURCE,
+@@ -15,6 +16,8 @@ import {
+ const props = defineProps<{
+   visible: boolean
+   noteId: string | null
++  currentContent?: string | null
++  currentTitle?: string | null
+ }>()
+ 
+ const emit = defineEmits<{
+@@ -33,6 +36,13 @@ const selectedHistory = ref<NoteHistoryDetail | null>(null)
+ const detailLoading = ref(false)
+ const rollingBack = ref(false)
+ 
++// ── Diff mode ─────────────────────────────────────────────────────────────────
++const mode = ref<'preview' | 'diff'>('preview')
++const diffVersionA = ref<string>('current')
++const diffVersionB = ref<string>('latest')
++/** Cache: key = 'current' | history_id → NoteHistoryDetail */
++const detailCache = ref<Record<string, NoteHistoryDetail>>({})
++
+ const CHANGE_TYPE_LABEL: Record<number, string> = {
+   [NOTE_HISTORY_CHANGE_TYPE.CREATE]: '创建',
+   [NOTE_HISTORY_CHANGE_TYPE.UPDATE]: '编辑',
+@@ -41,7 +51,7 @@ const CHANGE_TYPE_LABEL: Record<number, string> = {
+ }
+ 
+ const CHANGE_SOURCE_LABEL: Record<number, string> = {
+-  [NOTE_HISTORY_CHANGE_SOURCE.MANUAL]: '人为',
++  [NOTE_HISTORY_CHANGE_SOURCE.MANUAL]: '用户',
+   [NOTE_HISTORY_CHANGE_SOURCE.AI]: 'AI',
+ }
+ 
+@@ -69,12 +79,15 @@ async function loadHistories() {
+   }
+ }
+ 
++/** Load a detail into cache (and set as selected for preview). */
+ async function selectHistory(h: NoteHistorySummary) {
+   if (!props.noteId) return
+   detailLoading.value = true
+   selectedHistory.value = null
+   try {
+-    selectedHistory.value = await getNoteHistory(props.noteId, h.history_id)
++    const detail = await getNoteHistory(props.noteId, h.history_id)
++    detailCache.value[h.history_id] = detail
++    selectedHistory.value = detail
+   } catch (err) {
+     toast.error(err instanceof Error ? err.message : '加载详情失败')
+   } finally {
+@@ -108,16 +121,91 @@ async function loadMore() {
+   histories.value = [...prev, ...histories.value]
+ }
+ 
++// ── Diff helpers ──────────────────────────────────────────────────────────────
++
++/** Ensure a history detail is cached. Returns null for 'current'. */
++async function ensureCached(historyId: string): Promise<NoteHistoryDetail | null> {
++  if (historyId === 'current') return null
++  if (detailCache.value[historyId]) return detailCache.value[historyId]
++  if (!props.noteId) return null
++  try {
++    const detail = await getNoteHistory(props.noteId, historyId)
++    detailCache.value[historyId] = detail
++    return detail
++  } catch {
++    return null
++  }
++}
++
++/** Resolve a version id to its text content. */
++function versionContent(id: string): string {
++  if (id === 'current') return props.currentContent ?? ''
++  if (id === 'latest') return ''
++  const detail = detailCache.value[id]
++  return detail?.note_content ?? ''
++}
++
++/** Resolve a version id to its title. */
++function versionTitle(id: string): string {
++  if (id === 'current') return props.currentTitle ?? '无标题'
++  if (id === 'latest') return ''
++  const detail = detailCache.value[id]
++  return detail?.note_title ?? ''
++}
++
++const diffVersionOptions = computed(() => {
++  const options: { value: string; label: string }[] = [
++    { value: 'current', label: `当前版本 · ${props.currentTitle || '无标题'}` },
++  ]
++  for (const h of histories.value) {
++    const cached = detailCache.value[h.history_id]
++    const time = formatTime(cached?.created_at ?? h.created_at)
++    const type = CHANGE_TYPE_LABEL[h.change_type] ?? '变更'
++    options.push({ value: h.history_id, label: `${time} · ${type}` })
++  }
++  return options
++})
++
++const diffLines = computed(() => {
++  const a = versionContent(diffVersionA.value)
++  const b = versionContent(diffVersionB.value)
++  return computeDiff(a, b)
++})
++
++const latestHistoryId = computed(() => {
++  return histories.value.length > 0 ? histories.value[0].history_id : null
++})
++
++/** Switch to diff mode and ensure both sides are loaded. */
++async function switchToDiff() {
++  mode.value = 'diff'
++  // Default: latest history vs current
++  if (diffVersionA.value === 'current' && diffVersionB.value === 'latest' && latestHistoryId.value) {
++    diffVersionA.value = latestHistoryId.value
++    diffVersionB.value = 'current'
++  }
++  // Ensure selected versions are cached
++  await Promise.all([ensureCached(diffVersionA.value), ensureCached(diffVersionB.value)])
++}
++
+ // Reset + load whenever the drawer opens (or the note changes while open).
+ watch(
+   () => [props.visible, props.noteId] as const,
+-  ([visible]) => {
++  async ([visible]) => {
+     if (visible) {
+       histories.value = []
+       total.value = 0
+       page.value = 1
+       selectedHistory.value = null
+-      void loadHistories()
++      detailCache.value = {}
++      mode.value = 'preview'
++      diffVersionA.value = 'current'
++      diffVersionB.value = 'latest'
++      await loadHistories()
++      // Preload the latest history for default diff
++      if (histories.value.length > 0) {
++        await ensureCached(histories.value[0].history_id)
++      }
+     }
+   },
+   { immediate: true },
+@@ -125,10 +213,10 @@ watch(
+ </script>
+ 
+ <template>
+-  <Modal v-if="visible" title="历史记录" width="860px" @close="close">
+-    <div class="history-wrap">
++  <Modal v-if="visible" title="历史记录" width="900px" @close="close">
++    <div class="history-wrap flex flex-col md:flex-row gap-4 h-[80vh] md:h-[70vh] min-h-0">
+       <!-- Left: list -->
+-      <div class="history-list">
++      <div class="history-list w-full md:w-[260px] md:flex-shrink-0 max-h-[30vh] md:max-h-none overflow-y-auto">
+         <div v-if="loading && !histories.length" class="history-empty">加载中…</div>
+         <div v-else-if="!histories.length" class="history-empty">暂无历史记录</div>
+         <ul v-else class="history-items">
+@@ -142,7 +230,7 @@ watch(
+             <div class="hi-top">
+               <span class="hi-badge" :class="`type-${h.change_type}`">{{ CHANGE_TYPE_LABEL[h.change_type] ?? '变更' }}</span>
+               <span class="hi-source" :class="{ ai: h.change_source === NOTE_HISTORY_CHANGE_SOURCE.AI }">
+-                {{ CHANGE_SOURCE_LABEL[h.change_source] ?? '人为' }}
++                {{ CHANGE_SOURCE_LABEL[h.change_source] ?? '用户' }}
+               </span>
+             </div>
+             <div class="hi-time">{{ formatTime(h.created_at) }}</div>
+@@ -155,32 +243,91 @@ watch(
+         </button>
+       </div>
+ 
+-      <!-- Right: detail preview -->
++      <!-- Right: detail / diff -->
+       <div class="history-detail">
+-        <div v-if="detailLoading" class="history-empty">加载中…</div>
+-        <div v-else-if="!selectedHistory" class="history-empty">
+-          <Icon name="clock" :size="36" />
+-          <p>选择左侧的一条记录查看完整内容</p>
++        <!-- Mode tabs -->
++        <div class="detail-tabs">
++          <button class="tab-btn" :class="{ active: mode === 'preview' }" @click="mode = 'preview'">预览</button>
++          <button class="tab-btn" :class="{ active: mode === 'diff' }" @click="switchToDiff">对比</button>
+         </div>
+-        <template v-else>
+-          <div class="detail-head">
+-            <h3 class="detail-title">{{ selectedHistory.note_title || '无标题' }}</h3>
+-            <span class="hi-badge" :class="`type-${selectedHistory.change_type}`">
+-              {{ CHANGE_TYPE_LABEL[selectedHistory.change_type] ?? '变更' }}
+-            </span>
++
++        <!-- Preview mode -->
++        <template v-if="mode === 'preview'">
++          <div v-if="detailLoading" class="history-empty">加载中…</div>
++          <div v-else-if="!selectedHistory" class="history-empty">
++            <Icon name="clock" :size="36" />
++            <p>选择左侧的一条记录查看完整内容</p>
+           </div>
+-          <div class="detail-meta">
+-            <span>{{ formatTime(selectedHistory.created_at) }}</span>
+-            <span>{{ selectedHistory.note_word_count }} 字</span>
+-            <span v-if="selectedHistory.note_tags?.length" class="detail-tags">
+-              <span v-for="t in selectedHistory.note_tags" :key="t" class="tag-chip">{{ t }}</span>
+-            </span>
++          <template v-else>
++            <div class="detail-head">
++              <h3 class="detail-title">{{ selectedHistory.note_title || '无标题' }}</h3>
++              <span class="hi-badge" :class="`type-${selectedHistory.change_type}`">
++                {{ CHANGE_TYPE_LABEL[selectedHistory.change_type] ?? '变更' }}
++              </span>
++            </div>
++            <div class="detail-meta">
++              <span>{{ formatTime(selectedHistory.created_at) }}</span>
++              <span>{{ selectedHistory.note_word_count }} 字</span>
++              <span v-if="selectedHistory.note_tags?.length" class="detail-tags">
++                <span v-for="t in selectedHistory.note_tags" :key="t" class="tag-chip">{{ t }}</span>
++              </span>
++            </div>
++            <pre class="detail-content">{{ selectedHistory.note_content || '（空笔记）' }}</pre>
++            <div class="detail-footer">
++              <button class="btn-primary" :disabled="rollingBack" @click="confirmRollback">
++                {{ rollingBack ? '回滚中…' : '回滚到此版本' }}
++              </button>
++            </div>
++          </template>
++        </template>
++
++        <!-- Diff mode -->
++        <template v-else>
++          <div class="diff-selectors">
++            <div class="diff-select-group">
++              <label class="diff-label">版本 A</label>
++              <select v-model="diffVersionA" class="diff-select">
++                <option
++                  v-for="opt in diffVersionOptions"
++                  :key="opt.value"
++                  :value="opt.value"
++                  :disabled="opt.value === diffVersionB"
++                >
++                  {{ opt.label }}
++                </option>
++              </select>
++              <span class="diff-ver-title">{{ versionTitle(diffVersionA) }}</span>
++            </div>
++            <div class="diff-vs">vs</div>
++            <div class="diff-select-group">
++              <label class="diff-label">版本 B</label>
++              <select v-model="diffVersionB" class="diff-select">
++                <option
++                  v-for="opt in diffVersionOptions"
++                  :key="opt.value"
++                  :value="opt.value"
++                  :disabled="opt.value === diffVersionA"
++                >
++                  {{ opt.label }}
++                </option>
++              </select>
++              <span class="diff-ver-title">{{ versionTitle(diffVersionB) }}</span>
++            </div>
+           </div>
+-          <pre class="detail-content">{{ selectedHistory.note_content || '（空笔记）' }}</pre>
+-          <div class="detail-footer">
+-            <button class="btn-primary" :disabled="rollingBack" @click="confirmRollback">
+-              {{ rollingBack ? '回滚中…' : '回滚到此版本' }}
+-            </button>
++          <div class="diff-output">
++            <div v-if="diffVersionA === diffVersionB" class="history-empty">请选择两个不同的版本进行对比</div>
++            <div v-else-if="!diffLines.length" class="history-empty">两个版本内容相同</div>
++            <div
++              v-for="(line, idx) in diffLines"
++              :key="idx"
++              class="diff-line"
++              :class="`diff-${line.type}`"
++            >
++              <span class="diff-ln diff-ln-a">{{ line.lineA ?? '' }}</span>
++              <span class="diff-ln diff-ln-b">{{ line.lineB ?? '' }}</span>
++              <span class="diff-prefix">{{ line.type === 'added' ? '+' : line.type === 'removed' ? '-' : ' ' }}</span>
++              <span class="diff-text">{{ line.content }}</span>
++            </div>
+           </div>
+         </template>
+       </div>
+@@ -189,18 +336,9 @@ watch(
+ </template>
+ 
+ <style scoped>
+-.history-wrap {
+-  display: flex;
+-  gap: 16px;
+-  min-height: 420px;
+-  max-height: 70vh;
+-}
+ .history-list {
+-  width: 280px;
+-  flex-shrink: 0;
+   border: 1px solid var(--border);
+   border-radius: var(--radius);
+-  overflow-y: auto;
+   background: var(--bg-input);
+ }
+ .history-items {
+@@ -302,12 +440,42 @@ watch(
+ .history-empty svg {
+   opacity: 0.4;
+ }
++
++/* ── Mode tabs ────────────────────────────────────────────────────────────── */
++.detail-tabs {
++  display: flex;
++  gap: 0;
++  border-bottom: 1px solid var(--border);
++  flex-shrink: 0;
++}
++.tab-btn {
++  flex: 1;
++  padding: 10px;
++  font-size: 13px;
++  font-weight: 500;
++  color: var(--text-secondary);
++  background: transparent;
++  border: none;
++  border-bottom: 2px solid transparent;
++  cursor: pointer;
++  transition: color 0.15s, border-color 0.15s;
++}
++.tab-btn:hover {
++  color: var(--text-primary);
++}
++.tab-btn.active {
++  color: var(--accent);
++  border-bottom-color: var(--accent);
++}
++
++/* ── Preview mode ─────────────────────────────────────────────────────────── */
+ .detail-head {
+   display: flex;
+   align-items: center;
+   gap: 10px;
+   padding: 14px 16px;
+   border-bottom: 1px solid var(--border);
++  flex-shrink: 0;
+ }
+ .detail-title {
+   flex: 1;
+@@ -325,6 +493,7 @@ watch(
+   font-size: 12px;
+   color: var(--text-tertiary);
+   flex-wrap: wrap;
++  flex-shrink: 0;
+ }
+ .detail-tags {
+   display: inline-flex;
+@@ -355,7 +524,113 @@ watch(
+   border-top: 1px solid var(--border);
+   display: flex;
+   justify-content: flex-end;
++  flex-shrink: 0;
++}
++
++/* ── Diff mode ────────────────────────────────────────────────────────────── */
++.diff-selectors {
++  display: flex;
++  align-items: flex-start;
++  gap: 10px;
++  padding: 12px 16px;
++  border-bottom: 1px solid var(--border);
++  flex-shrink: 0;
++}
++.diff-select-group {
++  flex: 1;
++  min-width: 0;
++  display: flex;
++  flex-direction: column;
++  gap: 4px;
++}
++.diff-label {
++  font-size: 11px;
++  font-weight: 600;
++  color: var(--text-tertiary);
++  text-transform: uppercase;
++  letter-spacing: 0.05em;
++}
++.diff-select {
++  width: 100%;
++  padding: 6px 8px;
++  font-size: 12px;
++  border: 1px solid var(--border);
++  border-radius: 6px;
++  background: var(--bg-main);
++  color: var(--text-primary);
++  outline: none;
++}
++.diff-select:focus {
++  border-color: var(--accent);
++}
++.diff-ver-title {
++  font-size: 11px;
++  color: var(--text-tertiary);
++  white-space: nowrap;
++  overflow: hidden;
++  text-overflow: ellipsis;
+ }
++.diff-vs {
++  font-size: 12px;
++  font-weight: 700;
++  color: var(--text-tertiary);
++  padding-top: 22px;
++  flex-shrink: 0;
++}
++.diff-output {
++  flex: 1;
++  overflow-y: auto;
++  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
++  font-size: 12px;
++  line-height: 1.55;
++}
++.diff-line {
++  display: flex;
++  padding: 0 8px;
++  min-height: 1.55em;
++}
++.diff-line.diff-added {
++  background: rgba(22, 163, 74, 0.12);
++}
++.diff-line.diff-removed {
++  background: rgba(220, 38, 38, 0.10);
++}
++.diff-line.diff-unchanged {
++  color: var(--text-secondary);
++}
++.diff-ln {
++  width: 40px;
++  flex-shrink: 0;
++  text-align: right;
++  padding-right: 8px;
++  color: var(--text-tertiary);
++  user-select: none;
++}
++.diff-ln-a {
++  /* line numbers for version A */
++}
++.diff-ln-b {
++  /* line numbers for version B */
++}
++.diff-prefix {
++  width: 16px;
++  flex-shrink: 0;
++  text-align: center;
++  user-select: none;
++  font-weight: 700;
++}
++.diff-added .diff-prefix {
++  color: #16a34a;
++}
++.diff-removed .diff-prefix {
++  color: #dc2626;
++}
++.diff-text {
++  white-space: pre;
++  word-break: break-all;
++}
++
++/* ── Shared ───────────────────────────────────────────────────────────────── */
+ .btn-primary {
+   padding: 7px 16px;
+   border-radius: 6px;
+diff --git a/frontend/src/stores/auth.ts b/frontend/src/stores/auth.ts
+index 63e408d..8f97979 100644
+--- a/frontend/src/stores/auth.ts
++++ b/frontend/src/stores/auth.ts
+@@ -32,11 +32,12 @@ export const useAuthStore = defineStore('auth', () => {
+     user_name: string
+     password: string
+   }) {
++    // Registration is approval-gated: the account is created in a pending
++    // state and no tokens are returned. We don't log the user in — the caller
++    // surfaces the "awaiting approval" message and returns to the login view.
+     loading.value = true
+     try {
+-      const res = await authApi.register(body)
+-      tokenStorage.set(res.access_token, res.refresh_token)
+-      await fetchMe()
++      await authApi.register(body)
+     } finally {
+       loading.value = false
+     }
+diff --git a/frontend/src/stores/chat.ts b/frontend/src/stores/chat.ts
+new file mode 100644
+index 0000000..c0e0f2a
+--- /dev/null
++++ b/frontend/src/stores/chat.ts
+@@ -0,0 +1,35 @@
++import { defineStore } from 'pinia'
++import { ref } from 'vue'
++import { listChatSessions } from '@/api/ai'
++import type { ChatSession, SnowflakeId } from '@/types'
++
++export const useChatStore = defineStore('chat', () => {
++  const sessions = ref<ChatSession[]>([])
++  const currentSessionId = ref<SnowflakeId | null>(null)
++  const sending = ref(false)
++
++  async function loadSessions() {
++    try {
++      sessions.value = await listChatSessions()
++    } catch {
++      sessions.value = []
++    }
++  }
++
++  function startNewChat() {
++    if (sending.value) return
++    currentSessionId.value = null
++  }
++
++  function setCurrentSession(id: SnowflakeId) {
++    if (sending.value) return
++    currentSessionId.value = id
++  }
++
++  function removeSession(id: SnowflakeId) {
++    sessions.value = sessions.value.filter((s) => s.session_id !== id)
++    if (currentSessionId.value === id) startNewChat()
++  }
++
++  return { sessions, currentSessionId, sending, loadSessions, startNewChat, setCurrentSession, removeSession }
++})
+diff --git a/frontend/src/style.css b/frontend/src/style.css
+index cfe71a3..6d63d38 100644
+--- a/frontend/src/style.css
++++ b/frontend/src/style.css
+@@ -29,6 +29,8 @@
+   --sidebar-width: 280px;
+   --header-height: 52px;
+   --radius: 8px;
++  /* Max reading column for the note preview, centered inside the editor pane. */
++  --reading-width: 820px;
+ 
+   --danger: #dc2626;
+   --danger-light: #fee2e2;
+@@ -88,12 +90,12 @@ html {
+ body {
+   background: var(--bg-body);
+   color: var(--text-secondary);
+-  height: 100vh;
++  height: 100dvh;
+   overflow: hidden;
+ }
+ 
+ #app {
+-  height: 100vh;
++  height: 100dvh;
+ }
+ 
+ button {
+@@ -201,3 +203,51 @@ a {
+   white-space: nowrap;
+   border-width: 0;
+ }
++
++/* ─── Vditor dark mode text contrast ─── */
++/* Vditor's built-in dark theme only overrides CSS variables (--textarea-text-color
++   etc.) but never sets `color` on .vditor itself — so the editor text inherits
++   `body { color: var(--text-secondary) }` which is #94a3b8 (dim gray) in dark mode.
++   Vditor's dark content-theme CSS (loaded dynamically for preview) also doesn't
++   cover all elements. Fix both edit and preview text to use the light primary. */
++[data-theme="dark"] .vditor {
++  color: var(--text-primary);
++}
++/* IR editing area — Vditor's instant-render mode. */
++[data-theme="dark"] .vditor-ir {
++  color: var(--text-primary);
++}
++/* .vditor-reset is the content container used in both edit (code blocks) and
++   preview (the entire rendered body). Vditor's base CSS hardcodes #24292e (dark
++   gray) and the dynamic dark content-theme sets #d1d5da — override both. */
++[data-theme="dark"] .vditor-reset {
++  color: var(--text-primary);
++}
++/* Blockquotes use hardcoded #6a737d (light) / #b9b9b9 (dark) — too dim. */
++[data-theme="dark"] .vditor-reset blockquote {
++  color: var(--text-secondary);
++  border-left-color: var(--border);
++}
++/* Horizontal rules in dark mode. */
++[data-theme="dark"] .vditor-reset hr {
++  background-color: var(--border);
++}
++/* Inline code background — the dark content-theme uses a blue-ish bg that feels
++   out of place. Replace with the app's code background token. */
++[data-theme="dark"] .vditor-reset code:not(.hljs):not(.highlight-chroma) {
++  background-color: var(--bg-code);
++  color: var(--text-accent);
++}
++/* Tables — Vditor's base CSS hardcodes light borders (#c6cbd1 / #dfe2e5) and
++   pale row backgrounds; the dark content-theme only overrides a subset. */
++[data-theme="dark"] .vditor-reset table tr {
++  background-color: var(--bg-card);
++  border-top-color: var(--border);
++}
++[data-theme="dark"] .vditor-reset table td,
++[data-theme="dark"] .vditor-reset table th {
++  border-color: var(--border);
++}
++[data-theme="dark"] .vditor-reset table tbody tr:nth-child(2n) {
++  background-color: var(--bg-input);
++}
+diff --git a/frontend/src/types/index.ts b/frontend/src/types/index.ts
+index 9b97359..561ae05 100644
+--- a/frontend/src/types/index.ts
++++ b/frontend/src/types/index.ts
+@@ -14,6 +14,7 @@ export interface UserInfo {
+   user_account: string
+   user_name: string
+   is_active: number
++  audit_status: number
+   role_id: SnowflakeId
+   role_code: string | null
+ }
+@@ -26,6 +27,48 @@ export interface TokenResponse {
+   user_account: string | null
+ }
+ 
++/** Register response — no tokens (account is pending admin approval). */
++export interface RegisterResponse {
++  user_id: SnowflakeId
++  user_account: string
++  user_name: string
++  message: string
++}
++
++/** Audit status mirror (backend migration 009). */
++export const USER_AUDIT_STATUS = {
++  PENDING: 0,
++  APPROVED: 1,
++  REJECTED: 2,
++} as const
++
++/** Admin user-management row (mirrors UserResponse). */
++export interface UserItem {
++  user_id: SnowflakeId
++  user_account: string
++  user_name: string
++  role_id: SnowflakeId
++  role_code: string | null
++  role_name: string | null
++  is_active: number
++  audit_status: number
++  created_at: string | null
++}
++
++export interface UserListResponse {
++  items: UserItem[]
++  total: number
++  page: number
++  page_size: number
++}
++
++export interface UserListParams {
++  status?: number | null
++  keyword?: string | null
++  page?: number
++  page_size?: number
++}
++
+ export interface CategoryNode {
+   category_id: SnowflakeId
+   user_id: SnowflakeId
+diff --git a/frontend/src/utils/diff.ts b/frontend/src/utils/diff.ts
+new file mode 100644
+index 0000000..bda2cab
+--- /dev/null
++++ b/frontend/src/utils/diff.ts
+@@ -0,0 +1,65 @@
++/**
++ * Simple line-based diff using LCS (Longest Common Subsequence).
++ * Returns a sequence of lines tagged as added, removed, or unchanged.
++ */
++
++export interface DiffLine {
++  type: 'added' | 'removed' | 'unchanged'
++  content: string
++  /** 1-based line number in the "old" text (A), undefined for added lines. */
++  lineA?: number
++  /** 1-based line number in the "new" text (B), undefined for removed lines. */
++  lineB?: number
++}
++
++/** Compute the LCS table for two arrays. */
++function lcsTable<T>(a: T[], b: T[]): number[][] {
++  const m = a.length
++  const n = b.length
++  const dp: number[][] = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0))
++  for (let i = 1; i <= m; i++) {
++    for (let j = 1; j <= n; j++) {
++      if (a[i - 1] === b[j - 1]) {
++        dp[i][j] = dp[i - 1][j - 1] + 1
++      } else {
++        dp[i][j] = Math.max(dp[i - 1][j], dp[i][j - 1])
++      }
++    }
++  }
++  return dp
++}
++
++/** Backtrack the LCS table to produce diff lines. */
++function backtrack<T>(a: T[], b: T[], dp: number[][]): DiffLine[] {
++  const result: DiffLine[] = []
++  let i = a.length
++  let j = b.length
++
++  while (i > 0 || j > 0) {
++    if (i > 0 && j > 0 && a[i - 1] === b[j - 1]) {
++      result.push({ type: 'unchanged', content: String(a[i - 1]), lineA: i, lineB: j })
++      i--
++      j--
++    } else if (j > 0 && (i === 0 || dp[i][j - 1] >= dp[i - 1][j])) {
++      result.push({ type: 'added', content: String(b[j - 1]), lineB: j })
++      j--
++    } else {
++      result.push({ type: 'removed', content: String(a[i - 1]), lineA: i })
++      i--
++    }
++  }
++
++  result.reverse()
++  return result
++}
++
++/**
++ * Compute a line-by-line diff between two plain-text strings.
++ * textA = "old" version, textB = "new" version.
++ */
++export function computeDiff(textA: string, textB: string): DiffLine[] {
++  const linesA = (textA || '').split('\n')
++  const linesB = (textB || '').split('\n')
++  const dp = lcsTable(linesA, linesB)
++  return backtrack(linesA, linesB, dp)
++}
+diff --git a/frontend/src/views/AppView.vue b/frontend/src/views/AppView.vue
+index fe375d6..398715d 100644
+--- a/frontend/src/views/AppView.vue
++++ b/frontend/src/views/AppView.vue
+@@ -1,10 +1,12 @@
+ <script setup lang="ts">
+-import { ref, watch, onMounted, onBeforeUnmount } from 'vue'
++import { ref, watch, onMounted, onBeforeUnmount, computed } from 'vue'
+ import { useRouter } from 'vue-router'
++import Icon from '@/components/Icon.vue'
+ import AppSidebar from '@/components/layout/AppSidebar.vue'
+ import NoteEditor from '@/components/note/NoteEditor.vue'
+ import AiChat from '@/components/ai/AiChat.vue'
+ import AiSettings from '@/components/ai/AiSettings.vue'
++import UserManage from '@/components/admin/UserManage.vue'
+ import Toaster from '@/components/Toaster.vue'
+ import CategoryFormModal from '@/components/category/CategoryFormModal.vue'
+ import { useAuthStore } from '@/stores/auth'
+@@ -23,7 +25,21 @@ const toast = useToast()
+ const keyword = ref('')
+ const activeTag = ref<string | null>(null)
+ const selectedCategoryId = ref<SnowflakeId | null>(null)
+-const activeView = ref<'notes' | 'chat' | 'settings'>('notes')
++const activeView = ref<'notes' | 'chat' | 'settings' | 'users'>('notes')
++
++// Mobile sidebar drawer state. On desktop (md+) the sidebar is always visible
++// (static, translate-x-0), so this flag only affects the mobile overlay.
++const sidebarOpen = ref(false)
++function closeSidebar() {
++  sidebarOpen.value = false
++}
++const sidebarClass = computed(() => [
++  // Mobile: fixed overlay drawer, hidden off-canvas by default.
++  // Desktop: static, always visible.
++  'fixed inset-y-0 left-0 z-40 w-[min(86vw,var(--sidebar-width))] transition-transform duration-200',
++  sidebarOpen.value ? 'translate-x-0' : '-translate-x-full',
++  'md:static md:translate-x-0 md:z-auto md:w-[var(--sidebar-width)] md:flex-shrink-0',
++])
+ 
+ // Category modal state
+ const modalVisible = ref(false)
+@@ -64,10 +80,12 @@ async function onCategorySaved() {
+ function selectCategory(id: SnowflakeId) {
+   selectedCategoryId.value = id
+   activeView.value = 'notes'
++  closeSidebar()
+ }
+ 
+ async function selectNote(id: SnowflakeId) {
+   activeView.value = 'notes'
++  closeSidebar()
+   try {
+     await noteStore.selectNote(id)
+   } catch (err) {
+@@ -78,15 +96,24 @@ async function selectNote(id: SnowflakeId) {
+ function selectChat() {
+   activeView.value = 'chat'
+   noteStore.clearSelection()
++  closeSidebar()
+ }
+ 
+ function selectSettings() {
+   activeView.value = 'settings'
+   noteStore.clearSelection()
++  closeSidebar()
++}
++
++function selectUsers() {
++  activeView.value = 'users'
++  noteStore.clearSelection()
++  closeSidebar()
+ }
+ 
+ async function newNote(categoryId: SnowflakeId | null = selectedCategoryId.value) {
+   activeView.value = 'notes'
++  closeSidebar()
+   try {
+     await noteStore.create({
+       note_title: '无标题笔记',
+@@ -140,8 +167,27 @@ onBeforeUnmount(() => {
+ </script>
+ 
+ <template>
+-  <div class="app">
++  <div class="flex flex-col md:flex-row h-[100dvh]">
++    <!-- Mobile top bar (hamburger to open the sidebar drawer) -->
++    <header
++      class="md:hidden flex items-center gap-2 h-[var(--header-height)] px-3 flex-shrink-0 border-b border-[var(--border)] bg-[var(--bg-sidebar)]"
++    >
++      <button class="btn-icon" title="菜单" @click="sidebarOpen = true">
++        <Icon name="menu" :size="20" />
++      </button>
++      <img src="/favicon.svg" alt="智能笔记" class="w-7 h-7" />
++      <span class="font-semibold text-[var(--text-primary)]">智能笔记</span>
++    </header>
++
++    <!-- Mobile sidebar backdrop -->
++    <div
++      v-if="sidebarOpen"
++      class="md:hidden fixed inset-0 bg-black/40 z-30"
++      @click="closeSidebar"
++    />
++
+     <AppSidebar
++      :class="sidebarClass"
+       :selected-category-id="selectedCategoryId"
+       :selected-note-id="noteStore.selectedId"
+       :active-view="activeView"
+@@ -157,13 +203,15 @@ onBeforeUnmount(() => {
+       @remove="confirmRemoveCategory"
+       @select-chat="selectChat"
+       @select-settings="selectSettings"
++      @select-users="selectUsers"
+       @logout="logout"
+     />
+ 
+-    <main class="main">
++    <main class="flex-1 flex flex-col min-w-0 min-h-0">
+       <NoteEditor v-show="activeView === 'notes'" />
+       <AiChat v-show="activeView === 'chat'" />
+       <AiSettings v-show="activeView === 'settings'" :visible="activeView === 'settings'" />
++      <UserManage v-show="activeView === 'users'" :visible="activeView === 'users'" />
+     </main>
+ 
+     <CategoryFormModal
+@@ -175,16 +223,3 @@ onBeforeUnmount(() => {
+     <Toaster />
+   </div>
+ </template>
+-
+-<style scoped>
+-.app {
+-  display: flex;
+-  height: 100vh;
+-}
+-.main {
+-  flex: 1;
+-  display: flex;
+-  flex-direction: column;
+-  min-width: 0;
+-}
+-</style>
+diff --git a/frontend/src/views/LoginView.vue b/frontend/src/views/LoginView.vue
+index f8c2e7d..5091ad9 100644
+--- a/frontend/src/views/LoginView.vue
++++ b/frontend/src/views/LoginView.vue
+@@ -52,16 +52,20 @@ async function submit() {
+   try {
+     if (mode.value === 'login') {
+       await authStore.login(account.value.trim(), password.value)
++      toast.success('登录成功')
++      const redirect = (route.query.redirect as string) || '/'
++      router.replace(redirect)
+     } else {
+       await authStore.register({
+         user_account: account.value.trim(),
+         user_name: userName.value.trim(),
+         password: password.value,
+       })
++      // Approval-gated registration: no auto-login. Tell the user and return
++      // to the login tab so they can come back once an admin approves them.
++      toast.success('注册成功，请等待管理员审核后登录')
++      switchMode('login')
+     }
+-    toast.success(mode.value === 'login' ? '登录成功' : '注册成功')
+-    const redirect = (route.query.redirect as string) || '/'
+-    router.replace(redirect)
+   } catch (err) {
+     toast.error(extractErrorMessage(err, mode.value === 'login' ? '登录失败' : '注册失败'))
+   } finally {
+@@ -158,7 +162,7 @@ async function submit() {
+ 
+ <style scoped>
+ .login-page {
+-  height: 100vh;
++  min-height: 100dvh;
+   display: flex;
+   align-items: center;
+   justify-content: center;
+@@ -172,7 +176,12 @@ async function submit() {
+   border: 1px solid var(--border);
+   border-radius: 16px;
+   box-shadow: var(--shadow-lg);
+-  padding: 36px 32px;
++  padding: 28px 24px;
++}
++@media (min-width: 768px) {
++  .login-card {
++    padding: 36px 32px;
++  }
+ }
+ .brand {
+   text-align: center;

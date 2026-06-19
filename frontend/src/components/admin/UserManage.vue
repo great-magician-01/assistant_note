@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch, computed } from 'vue'
+import { ref, watch, computed, onBeforeUnmount } from 'vue'
 import dayjs from 'dayjs'
 import Icon from '@/components/Icon.vue'
 import Modal from '@/components/Modal.vue'
@@ -40,16 +40,12 @@ const resetTarget = ref<UserItem | null>(null)
 const newPassword = ref('')
 const resetting = ref(false)
 
-let loaded = false
-async function ensureLoaded() {
-  if (loaded || !authStore.isAdmin) return
-  loaded = true
-  await fetchList()
-}
+// Re-fetch each time the view becomes visible so a newly-registered pending
+// user shows up without the admin needing to trigger an action first.
 watch(
   () => props.visible,
   (v) => {
-    if (v) void ensureLoaded()
+    if (v && authStore.isAdmin) void fetchList()
   },
   { immediate: true },
 )
@@ -85,6 +81,11 @@ watch(keyword, () => {
 watch(filter, () => {
   page.value = 1
   void fetchList()
+})
+
+// Clear any pending debounced search when the view is torn down.
+onBeforeUnmount(() => {
+  if (keywordTimer) window.clearTimeout(keywordTimer)
 })
 
 const totalPages = computed(() => Math.max(1, Math.ceil(total.value / pageSize)))
