@@ -9,9 +9,12 @@ Epoch: 2024-01-01 00:00:00 UTC
 
 import time
 import threading
+import logging
 
 # Epoch: 2024-01-01 00:00:00 UTC
 EPOCH = 1704067200000
+
+logger = logging.getLogger(__name__)
 
 # Bit lengths
 MACHINE_ID_BITS = 10
@@ -53,6 +56,10 @@ class SnowflakeGenerator:
             timestamp = self._current_millis()
 
             if timestamp < self.last_timestamp:
+                logger.error(
+                    "Clock moved backwards: last=%s now=%s (diff=%sms)",
+                    self.last_timestamp, timestamp, self.last_timestamp - timestamp,
+                )
                 raise RuntimeError(
                     f"Clock moved backwards. Refusing to generate id for "
                     f"{self.last_timestamp - timestamp} milliseconds"

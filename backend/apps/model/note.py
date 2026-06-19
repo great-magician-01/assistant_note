@@ -51,7 +51,7 @@ class Note(Base, TimestampMixin):
         nullable=True,
         comment="AI生成摘要",
     )
-    note_tags: Mapped[dict | None] = mapped_column(
+    note_tags: Mapped[list | None] = mapped_column(
         JSONB,
         nullable=True,
         default=list,
@@ -94,5 +94,11 @@ class Note(Base, TimestampMixin):
             "user_id",
             "is_deleted",
             "updated_at",
+        ),
+        # GIN index on note_tags for tag-based filtering (note_tags @> '["tag"]')
+        Index(
+            "ix_notes_note_tags",
+            "note_tags",
+            postgresql_using="gin",
         ),
     )

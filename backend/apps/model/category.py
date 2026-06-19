@@ -1,6 +1,6 @@
 """Category ORM model."""
 
-from sqlalchemy import BigInteger, Integer, SmallInteger, String, UniqueConstraint
+from sqlalchemy import BigInteger, Index, Integer, SmallInteger, String, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from backend.apps.model.base import Base, TimestampMixin
@@ -54,10 +54,15 @@ class Category(Base, TimestampMixin):
     )
 
     __table_args__ = (
-        UniqueConstraint(
+        # Partial unique index: only enforce name uniqueness among non-deleted
+        # rows, so a soft-deleted category does not block recreating the same
+        # name. Mirrors migration 002's partial unique index.
+        Index(
+            "uq_category_user_name_parent",
             "user_id",
             "category_name",
             "parent_id",
-            name="uq_category_user_name_parent",
+            unique=True,
+            postgresql_where=text("is_deleted = 0"),
         ),
     )

@@ -39,11 +39,20 @@ class Settings(BaseSettings):
     LOG_DIR: str = "pylogs"
     DEBUG: bool = False
 
-    # AI
-    AI_TYPE: str = ""
-    API_KEY: str = ""
-    API_BASE: str = ""
-    AI_MODEL: str = ""
+    # Admin account — auto-registered/ensured on startup (password reset each
+    # start). Leave empty to skip admin bootstrap.
+    ADMIN_ACCOUNT: str = ""
+    ADMIN_PASSWORD: str = ""
+
+    # Image upload — files stored under UPLOAD_DIR/<user_id>/<snowflake>.<ext>,
+    # served publicly at UPLOAD_BASE_URL (mounted as StaticFiles in main.py).
+    UPLOAD_DIR: str = "uploads"
+    UPLOAD_BASE_URL: str = "/uploads"
+    UPLOAD_MAX_SIZE_MB: int = 10
+    # Comma-separated lowercase extension whitelist (no leading dot).
+    # SVG excluded by default: served as image/svg+xml it runs <script> when the
+    # public URL is opened directly (stored XSS via direct navigation).
+    UPLOAD_ALLOWED_EXT: str = "png,jpg,jpeg,gif,webp"
 
     @property
     def DATABASE_URL(self) -> str:
@@ -57,6 +66,10 @@ class Settings(BaseSettings):
         if self.CORS_ALLOW_ORIGINS == "*":
             return ["*"]
         return [origin.strip() for origin in self.CORS_ALLOW_ORIGINS.split(",")]
+
+    @property
+    def UPLOAD_ALLOWED_EXT_LIST(self) -> set[str]:
+        return {ext.strip().lower().lstrip(".") for ext in self.UPLOAD_ALLOWED_EXT.split(",") if ext.strip()}
 
 
 settings = Settings()

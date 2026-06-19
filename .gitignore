@@ -32,6 +32,10 @@ env/
 pylogs/
 *.log
 
+# ==================== 用户上传 ====================
+# Image uploads are runtime data (served via StaticFiles), not source.
+uploads/
+
 # ==================== Node / Vite ====================
 node_modules/
 dist/

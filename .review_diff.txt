@@ -1,0 +1,2132 @@
+diff --git a/.env.example b/.env.example
+index bd8709a..3c0a329 100644
+--- a/.env.example
++++ b/.env.example
+@@ -32,15 +32,8 @@ DEBUG=false
+ # CORS 允许的来源（逗号分隔，生产环境请设置具体域名，而非 *）
+ CORS_ALLOW_ORIGINS=*
+ 
+-
+-# AI 配置
+-
+-# OPENAI / ANTHROPIC 
+-AI_TYPE=
+-
+-API_KEY=
+-
+-API_BASE=
+-
+-AI_MODEL=
++# 管理员账号 — 启动时自动注册/确保存在并设为管理员(每次启动重置密码)
++# 留空则跳过管理员引导
++ADMIN_ACCOUNT=
++ADMIN_PASSWORD=
+ 
+diff --git a/CLAUDE.md b/CLAUDE.md
+index 6adaf51..77dc341 100644
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -9,7 +9,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
+ - **Backend**: Python FastAPI — full auth (JWT + bcrypt), CRUD for categories (tree) and notes, Chinese full-text search via jieba + PostgreSQL tsvector
+ - **Frontend**: Vue 3 + Vite + TypeScript — Tailwind v4 integrated, dependencies installed, but `main.ts` only mounts an empty App
+ - **Database**: PostgreSQL (primary) + SQLite (cache)
+-- **AI**: DeepSeek V4 Pro via OpenAI-compatible API
++- **AI**: Multi-model — model pool (`ai_models`) and runtime configs (`ai_configs`) stored in the DB and managed via API (no `.env` AI config). Different models (OpenAI/Anthropic format, multimodal, etc.) can be configured per use case. A tool registry (`apps/ai/tools/`) exposes callable tools (note search, tag search) that configs can enable.
++- **Roles**: Users have a role (`user`/`admin`) via a `roles` lookup table. An admin account is bootstrapped from `.env` on startup (created if missing, else password reset + forced admin). AI config/tool management is admin-only.
+ 
+ ## Essential Commands
+ 
+@@ -62,27 +63,31 @@ Modular FastAPI application with this layered structure:
+ | Directory | Purpose |
+ |---|---|
+ | `main.py` | FastAPI app entry point — CORS, middleware, exception handlers, lifespan |
+-| `apps/api/` | API endpoint definitions (route handlers) — `auth.py`, `category.py`, `note.py` |
+-| `apps/model/` | SQLAlchemy ORM models (PostgreSQL) — `base.py`, `user.py`, `category.py`, `note.py` |
++| `apps/api/` | API endpoint definitions (route handlers) — `auth.py`, `category.py`, `note.py`, `ai_model.py`, `ai_config.py`, `ai_tool.py` |
++| `apps/model/` | SQLAlchemy ORM models (PostgreSQL) — `base.py`, `user.py`, `category.py`, `note.py`, `role.py`, `ai_model.py`, `ai_config.py` |
+ | `apps/router/` | Route registration — `api_router.py` aggregates sub-routers under `/api` |
+-| `apps/service/` | Business logic layer — `auth_service.py`, `category_service.py`, `note_service.py` |
++| `apps/service/` | Business logic layer — `auth_service.py`, `category_service.py`, `note_service.py`, `ai_model_service.py`, `ai_config_service.py` |
++| `apps/ai/tools/` | AI tool registry — `base.py` (BaseTool), `registry.py`, built-in tools (`search_notes`, `search_notes_by_tag`) |
+ | `apps/utils/config.py` | Configuration loading from `.env` via pydantic-settings |
+ | `apps/utils/database.py` | Async SQLAlchemy engine, session factory, and `get_db` FastAPI dependency |
+-| `apps/utils/security.py` | JWT creation/validation, bcrypt password hashing, `get_current_user` dependency |
++| `apps/utils/security.py` | JWT creation/validation, bcrypt password hashing, `get_current_user` + `get_current_admin` dependencies |
+ | `apps/utils/snowflake.py` | Thread-safe 64-bit Snowflake ID generator (epoch: 2024-01-01) |
+ | `apps/utils/logger.py` | Date+size rotating file logger with trace-id injection via ContextVar |
+-| `apps/utils/exceptions.py` | `BusinessError` (→400) and `NotFoundError` (→404) exception classes |
++| `apps/utils/exceptions.py` | `BusinessError` (→400), `NotFoundError` (→404), `ForbiddenError` (→403) exception classes |
+ | `apps/utils/cache.py` | Caching utilities (stub — not yet implemented) |
+ 
+ #### API Routes
+ 
+-All routes are prefixed with `/api` and require `Authorization: Bearer <token>` (except auth endpoints).
++All routes are prefixed with `/api` and require `Authorization: Bearer <token>` (except auth endpoints). **All endpoints use only `GET` and `POST` — no `PUT`/`DELETE`** (see design decisions below). Updates use `POST /{id}/update`, deletes use `POST /{id}/delete`.
+ 
+ | Prefix | Tag | Endpoints |
+ |---|---|---|
+-| `/auth/v1` | Auth | `POST /register`, `POST /login`, `POST /refresh`, `GET /me` |
+-| `/category/v1` | Category | `GET /` (tree), `POST /`, `PUT /{id}`, `DELETE /{id}` |
+-| `/note/v1` | Note | `GET /` (paginated + search), `GET /{id}`, `POST /`, `PUT /{id}`, `DELETE /{id}` |
++| `/v1/auth` | Auth | `POST /register`, `POST /login`, `POST /refresh`, `GET /me` |
++| `/v1/category` | Category | `GET /` (tree), `POST /`, `POST /{id}/update`, `POST /{id}/delete` |
++| `/v1/note` | Note | `GET /` (paginated + search + tag filter), `GET /tags`, `POST /move`, `GET /{id}`, `POST /`, `POST /{id}/update`, `POST /{id}/delete` |
++| `/v1/ai-model` | AiModel | `GET /` (pool list; non-admin sees `api_key` masked), `POST /` (admin), `POST /{id}/update` (admin), `POST /{id}/delete` (admin) |
++| `/v1/ai-config` | AiConfig | `GET /` (config list, all users; no `api_key` exposed), `POST /` (admin), `POST /{id}/update` (admin), `POST /{id}/delete` (admin) |
++| `/v1/ai-tool` | AiTool | `GET /` (tool registry metadata; admin only) |
+ | `/health` | Health | `GET /` (no auth) |
+ 
+ #### Key Backend Design Decisions
+@@ -90,19 +95,32 @@ All routes are prefixed with `/api` and require `Authorization: Bearer <token>`
+ - **Snowflake IDs**: All primary keys are 64-bit Snowflake IDs generated in the application layer (not auto-increment). Global singleton with `machine_id=1`.
+ - **Timestamps**: `created_at`/`updated_at` use application-server `datetime.now()` via the `TimestampMixin`, NOT database `now()`. This was an intentional refactor (commit `0ab4858`).
+ - **Soft delete**: Categories and notes use `is_deleted` flag (0=正常, 1=已删除). All queries filter `is_deleted == 0`. Category deletion cascades to descendants.
++- **Category name uniqueness**: Enforced via a **partial unique index** `uq_category_user_name_parent` on `(user_id, category_name, parent_id) WHERE is_deleted = 0` (migration 002). The original plain `UNIQUE` constraint counted soft-deleted rows, blocking same-name recreation after delete. The app-layer duplicate check still uses `is_deleted == 0` and `IS NULL` for `parent_id`, so it guards top-level (NULL parent) duplicates that the DB index treats as distinct across NULLs.
++- **Category deletion guard**: `delete_category` refuses to delete if any non-deleted note exists under the category or its descendants — otherwise those notes would be orphaned (pointing at a soft-deleted category). The user must move/delete the notes first (returns `BusinessError`). Empty child categories are still cascade-soft-deleted.
++- **Note tags**: `note_tags` is a JSONB array, indexed with a GIN index `ix_notes_note_tags` (migration 002). `GET /v1/note/?tag=...` filters via JSONB containment (`@>`); `GET /v1/note/tags` returns all distinct tags for the user.
+ - **Chinese full-text search**: PostgreSQL's built-in parsers don't tokenize Chinese. The app uses **jieba** to segment title/content before feeding to `to_tsvector('simple', ...)`, and segments the search keyword for `plainto_tsquery`. No PostgreSQL extensions (zhparser/pg_jieba) needed. Title gets weight 'A', content gets weight 'B'. A GIN index exists on `search_vector`.
+ - **Sliding token refresh**: Every authenticated request gets a fresh access token in the `X-Access-Token` response header (set by middleware in `main.py`, token generated in `get_current_user` dependency). This resets the 2-hour expiry window on each request.
+ - **Trace ID**: Every request gets a `trace_id` (UUID hex, 16 chars) injected into all log records via `ContextVar` + logging Filter. Also returned in `X-Trace-Id` response header.
+ - **Log rotation**: Custom `_DateSizeRotatingFileHandler` — one directory per day (`{LOG_DIR}/YYYY-MM-DD/`), files roll at 200 MB. Thread-safe via `threading.Lock`.
+ - **Password hashing**: Uses `bcrypt` directly (not passlib) due to compatibility issues with bcrypt 5.x.
+ - **No foreign keys**: Database has no FK constraints — relationships are enforced in the application layer. (See migration SQL.)
++- **AI multi-model config (DB-backed)**: AI provider config moved out of `.env` into two global tables: `ai_models` (pool of connection entries) and `ai_configs` (a pool model + runtime params: prompt, tools, json_output, temperature...). Both are **global/shared** (no `user_id`) — an exception to the per-user isolation used elsewhere. `api_key` is stored plaintext. Deleting a pool model is blocked while a config references it. `ai_configs.is_default` is kept to a single global row via a partial unique index.
++- **Roles & admin**: `roles` is a system lookup table seeded with fixed IDs (`1`=user, `2`=admin); `users.role_id` references it (no FK, default `1`). Constants in `apps/model/role.py` (`ROLE_ID_USER`/`ROLE_ID_ADMIN`) are used directly on the hot path (e.g. the admin guard) instead of querying. An admin account is bootstrapped from `.env` (`ADMIN_ACCOUNT`/`ADMIN_PASSWORD`) on startup via `auth_service.ensure_admin_account`: created if missing, else password reset + role forced to admin (password resets every start by design). The bootstrap runs in `lifespan` and tolerates DB errors so the app still boots.
++- **Admin-only endpoints**: `get_current_admin` (in `security.py`) wraps `get_current_user` and raises `ForbiddenError` (→403) if `user.role_id != ROLE_ID_ADMIN`. AI config CUD (`/ai-model`, `/ai-config` POST/update/delete) and the tool list (`/ai-tool GET`) require admin. AI config `GET` is open to all authenticated users; `/ai-model GET` masks `api_key` for non-admins (`sk-***d112`), and `/ai-config GET` never exposes `api_key`. `ForbiddenError` (403) is registered in `main.py` alongside `BusinessError`(400)/`NotFoundError`(404).
++- **AI tool registry**: `apps/ai/tools/` holds self-describing tools (name, description, JSON-schema `parameters`, async `execute`). `registry.py` registers them; `ai_configs.tools` stores tool names. Built-in tools: `search_notes` (full-text) and `search_notes_by_tag` (tag filter), both wrapping `note_service.list_notes` and returning trimmed note summaries (no content). `GET /v1/ai-tool` returns the metadata (admin only) so configs can pick tools. Add a tool by subclassing `BaseTool` and appending to `_TOOLS` in `registry.py`.
+ - **`exclude_unset` pattern**: Update endpoints use `model_dump(exclude_unset=True)` so omitted fields are left unchanged and explicit `None` means "set to NULL".
++- **Move notes**: `POST /v1/note/move` accepts `note_ids: list[int]` + `category_id` (single note = list of one; `category_id=null` → uncategorized). Validates the target category exists/belongs to user and every note exists/owned; returns `{moved, total, category_id}`. Only notes whose category actually changed are counted in `moved`.
++- **GET/POST only**: Every API endpoint uses only `GET` (read) and `POST` (write/action) — no `PUT` or `DELETE`. Updates are `POST /{id}/update`, deletions are `POST /{id}/delete`. This is a project-wide convention; apply it to all future endpoints.
++- **IDs as strings**: Snowflake IDs are 64-bit and exceed JavaScript's `Number.MAX_SAFE_INTEGER` (2^53), so they MUST be serialized as JSON strings. All `*_id` fields in request/response models use the `SnowflakeId` / `OptionalSnowflakeId` annotated types (`apps/utils/types.py`), which coerce `int`↔`str` at the API boundary. The service/ORM layers keep IDs as `int`; conversion happens in the API handlers (path params parsed with `int()`, body fields coerced before calling services). Path params like `{note_id}`/`{category_id}` are declared `str` and converted to `int` inside the handler.
+ 
+ #### Database Models
+ 
+-- **User** (`users`): `user_id`, `user_account` (unique), `user_name`, `user_password` (bcrypt), `is_active`
+-- **Category** (`categories`): `category_id`, `user_id`, `category_name`, `category_icon`, `category_sort`, `parent_id` (nullable, self-referential for tree), `is_deleted`. Unique constraint on `(user_id, category_name, parent_id)`.
+-- **Note** (`notes`): `note_id`, `user_id`, `category_id`, `note_title`, `note_content` (Markdown), `note_summary` (AI-generated), `note_tags` (JSONB), `search_vector` (TSVECTOR, deferred), `is_pinned`, `is_deleted`, `note_word_count`. Composite index on `(user_id, is_deleted, updated_at)`.
++- **User** (`users`): `user_id`, `user_account` (unique), `user_name`, `user_password` (bcrypt), `role_id` (default `1`=普通用户, references `roles`, no FK), `is_active`
++- **Role** (`roles`) — system lookup table seeded with fixed IDs (migration 004): `role_id` (`1`=普通用户, `2`=管理员), `role_code` (unique, `user`/`admin`), `role_name`, `remark`. App code references the IDs via constants in `apps/model/role.py` (`ROLE_ID_USER`/`ROLE_ID_ADMIN`) instead of querying.
++- **Category** (`categories`): `category_id`, `user_id`, `category_name`, `category_icon`, `category_sort`, `parent_id` (nullable, self-referential for tree), `is_deleted`. Partial unique index on `(user_id, category_name, parent_id) WHERE is_deleted = 0`.
++- **Note** (`notes`): `note_id`, `user_id`, `category_id`, `note_title`, `note_content` (Markdown), `note_summary` (AI-generated), `note_tags` (JSONB array), `search_vector` (TSVECTOR, deferred), `is_pinned`, `is_deleted`, `note_word_count`. Composite index on `(user_id, is_deleted, updated_at)`; GIN index on `search_vector`; GIN index on `note_tags`.
++- **AiModel** (`ai_models`) — global model pool (no `user_id`): `model_id`, `name`, `api_format` (openai/anthropic), `base_url`, `api_key` (plaintext), `model`, `is_multimodal`, `max_tokens`, `remark`, `extra_config` (JSONB), `is_active`, `is_deleted`. Migration 003.
++- **AiConfig** (`ai_configs`) — global runtime config (no `user_id`): `config_id`, `config_name`, `model_id` (references pool, app-layer validated, no FK), `system_prompt`, `tools` (JSONB array of tool names), `json_output`, `temperature`, `top_p`, `max_tokens` (nullable override), `is_default`, `is_active`, `is_deleted`. Partial unique index `uq_ai_configs_default` keeps at most one default globally (`WHERE is_default = 1 AND is_deleted = 0`). Migration 003.
+ 
+ Key dependencies: FastAPI 0.137, SQLAlchemy 2.0 (async with asyncpg), Pydantic v2, PyJWT 2.13, bcrypt 5.0, jieba 0.42, OpenAI SDK 2.41, Uvicorn 0.49.
+ 
+@@ -132,11 +150,13 @@ Dependencies installed in `package.json` but NOT imported/used yet:
+ - `LOG_DIR` — log directory (default `pylogs`)
+ - `DEBUG` — when `true`, sets log level to DEBUG and echoes SQL queries
+ - `CORS_ALLOW_ORIGINS` — comma-separated or `*`
+-- `AI_TYPE`, `API_KEY`, `API_BASE`, `AI_MODEL` — AI provider config (for DeepSeek)
++- `ADMIN_ACCOUNT` / `ADMIN_PASSWORD` — bootstrap admin account; on startup the account is created if missing (with the admin role) or, if it exists, its password is reset and role forced to admin. Leave empty to skip.
++
++(AI provider config is no longer in `.env` — it lives in the `ai_models`/`ai_configs` tables, managed via API.)
+ 
+ ### Database
+ 
+-PostgreSQL is the primary database. The migration script is at `migration/001_init_tables.sql` — it creates all three tables with indexes, comments, and the GIN index for full-text search. **No Alembic** — migrations are raw SQL files. No FK constraints by design.
++PostgreSQL is the primary database. Migrations are raw SQL files in `migration/` (**no Alembic**): `001_init_tables.sql` (users/categories/notes + FTS GIN index), `002_partial_unique_and_tags_index.sql` (category partial unique index + note_tags GIN), `003_ai_model_and_config.sql` (ai_models + ai_configs), `004_roles_and_user_role.sql` (roles + users.role_id). No FK constraints by design.
+ 
+ SQLite is referenced in config as a secondary/cache store but not yet used.
+ 
+diff --git a/backend/apps/api/auth.py b/backend/apps/api/auth.py
+index b4e4c76..7142260 100644
+--- a/backend/apps/api/auth.py
++++ b/backend/apps/api/auth.py
+@@ -1,15 +1,22 @@
+-"""Auth API endpoints — /auth/v1/"""
++"""Auth API endpoints — /v1/auth/"""
++
++import logging
+ 
+ from fastapi import APIRouter, Depends
+ from pydantic import BaseModel, Field
++from sqlalchemy import select
+ from sqlalchemy.ext.asyncio import AsyncSession
+ 
++from backend.apps.model.role import Role
+ from backend.apps.model.user import User
+ from backend.apps.service import auth_service
+ from backend.apps.utils.database import get_db
+ from backend.apps.utils.security import get_current_user
++from backend.apps.utils.types import SnowflakeId
++
++logger = logging.getLogger(__name__)
+ 
+-router = APIRouter(prefix="/auth/v1", tags=["Auth"])
++router = APIRouter(prefix="/v1/auth", tags=["Auth"])
+ 
+ 
+ # ── Request / Response schemas ───────────────────────────────────────────────
+@@ -33,16 +40,18 @@ class RefreshRequest(BaseModel):
+ class TokenResponse(BaseModel):
+     access_token: str
+     refresh_token: str
+-    user_id: int
++    user_id: SnowflakeId
+     user_name: str
+     user_account: str | None = None
+ 
+ 
+ class UserInfoResponse(BaseModel):
+-    user_id: int
++    user_id: SnowflakeId
+     user_account: str
+     user_name: str
+     is_active: int
++    role_id: SnowflakeId
++    role_code: str | None = None
+ 
+ 
+ # ── Endpoints ────────────────────────────────────────────────────────────────
+@@ -53,6 +62,7 @@ async def register(
+     body: RegisterRequest,
+     db: AsyncSession = Depends(get_db),
+ ):
++    logger.debug("POST /register: account=%s", body.user_account)
+     result = await auth_service.register(
+         db=db,
+         user_account=body.user_account,
+@@ -67,6 +77,7 @@ async def login(
+     body: LoginRequest,
+     db: AsyncSession = Depends(get_db),
+ ):
++    logger.debug("POST /login: account=%s", body.user_account)
+     result = await auth_service.login(
+         db=db,
+         user_account=body.user_account,
+@@ -80,6 +91,7 @@ async def refresh(
+     body: RefreshRequest,
+     db: AsyncSession = Depends(get_db),
+ ):
++    logger.debug("POST /refresh")
+     result = await auth_service.refresh_access_token(
+         db=db,
+         refresh_token=body.refresh_token,
+@@ -90,11 +102,17 @@ async def refresh(
+ @router.get("/me", response_model=UserInfoResponse, summary="获取当前用户信息")
+ async def me(
+     user: User = Depends(get_current_user),
++    db: AsyncSession = Depends(get_db),
+ ):
+     # Sliding refresh is handled by the middleware in main.py
++    logger.debug("GET /me: user_id=%s", user.user_id)
++    role_result = await db.execute(select(Role).where(Role.role_id == user.role_id))
++    role = role_result.scalar_one_or_none()
+     return UserInfoResponse(
+         user_id=user.user_id,
+         user_account=user.user_account,
+         user_name=user.user_name,
+         is_active=user.is_active,
++        role_id=user.role_id,
++        role_code=role.role_code if role else None,
+     )
+diff --git a/backend/apps/api/category.py b/backend/apps/api/category.py
+index ce77327..6ec4e7c 100644
+--- a/backend/apps/api/category.py
++++ b/backend/apps/api/category.py
+@@ -1,5 +1,6 @@
+-"""Category API endpoints — /category/v1/"""
++"""Category API endpoints — /v1/category/"""
+ 
++import logging
+ from typing import Optional
+ 
+ from fastapi import APIRouter, Depends
+@@ -10,8 +11,11 @@ from backend.apps.model.user import User
+ from backend.apps.service import category_service
+ from backend.apps.utils.database import get_db
+ from backend.apps.utils.security import get_current_user
++from backend.apps.utils.types import OptionalSnowflakeId, SnowflakeId
+ 
+-router = APIRouter(prefix="/category/v1", tags=["Category"])
++logger = logging.getLogger(__name__)
++
++router = APIRouter(prefix="/v1/category", tags=["Category"])
+ 
+ 
+ # ── Request / Response schemas ───────────────────────────────────────────────
+@@ -21,23 +25,23 @@ class CategoryCreateRequest(BaseModel):
+     category_name: str = Field(..., min_length=1, max_length=100, description="分类名称")
+     category_icon: Optional[str] = Field(None, max_length=50, description="图标标识")
+     category_sort: int = Field(0, description="排序序号")
+-    parent_id: Optional[int] = Field(None, description="父分类ID")
++    parent_id: OptionalSnowflakeId = Field(None, description="父分类ID")
+ 
+ 
+ class CategoryUpdateRequest(BaseModel):
+     category_name: Optional[str] = Field(None, min_length=1, max_length=100, description="分类名称")
+     category_icon: Optional[str] = Field(None, max_length=50, description="图标标识")
+     category_sort: Optional[int] = Field(None, description="排序序号")
+-    parent_id: Optional[int] = Field(None, description="父分类ID(None=顶级分类)")
++    parent_id: OptionalSnowflakeId = Field(None, description="父分类ID(None=顶级分类)")
+ 
+ 
+ class CategoryResponse(BaseModel):
+-    category_id: int
+-    user_id: int
++    category_id: SnowflakeId
++    user_id: SnowflakeId
+     category_name: str
+     category_icon: Optional[str] = None
+     category_sort: int
+-    parent_id: Optional[int] = None
++    parent_id: OptionalSnowflakeId = None
+     children: list["CategoryResponse"] = []
+     created_at: Optional[str] = None
+     updated_at: Optional[str] = None
+@@ -51,6 +55,7 @@ async def list_categories(
+     user: User = Depends(get_current_user),
+     db: AsyncSession = Depends(get_db),
+ ):
++    logger.debug("GET /category: user_id=%s", user.user_id)
+     return await category_service.list_categories(db, user.user_id)
+ 
+ 
+@@ -60,22 +65,24 @@ async def create_category(
+     user: User = Depends(get_current_user),
+     db: AsyncSession = Depends(get_db),
+ ):
++    parent_id = int(body.parent_id) if body.parent_id is not None else None
++    logger.debug("POST /category: user_id=%s, name=%s, parent_id=%s", user.user_id, body.category_name, parent_id)
+     category = await category_service.create_category(
+         db=db,
+         user_id=user.user_id,
+         category_name=body.category_name,
+         category_icon=body.category_icon,
+         category_sort=body.category_sort,
+-        parent_id=body.parent_id,
++        parent_id=parent_id,
+     )
+     result = category_service._category_to_dict(category)
+     result["children"] = []
+     return result
+ 
+ 
+-@router.put("/{category_id}", response_model=CategoryResponse, summary="更新分类")
++@router.post("/{category_id}/update", response_model=CategoryResponse, summary="更新分类")
+ async def update_category(
+-    category_id: int,
++    category_id: str,
+     body: CategoryUpdateRequest,
+     user: User = Depends(get_current_user),
+     db: AsyncSession = Depends(get_db),
+@@ -83,10 +90,15 @@ async def update_category(
+     # exclude_unset: only pass fields the client actually sent, so omitting
+     # parent_id leaves it unchanged instead of resetting it to NULL.
+     fields = body.model_dump(exclude_unset=True)
++    # Coerce string parent_id back to int for the service layer
++    if "parent_id" in fields and fields["parent_id"] is not None:
++        fields["parent_id"] = int(fields["parent_id"])
++    cid = int(category_id)
++    logger.debug("PUT /category/%s: user_id=%s, fields=%s", cid, user.user_id, list(fields.keys()))
+     category = await category_service.update_category(
+         db=db,
+         user_id=user.user_id,
+-        category_id=category_id,
++        category_id=cid,
+         fields=fields,
+     )
+     result = category_service._category_to_dict(category)
+@@ -94,11 +106,13 @@ async def update_category(
+     return result
+ 
+ 
+-@router.delete("/{category_id}", summary="删除分类")
++@router.post("/{category_id}/delete", summary="删除分类")
+ async def delete_category(
+-    category_id: int,
++    category_id: str,
+     user: User = Depends(get_current_user),
+     db: AsyncSession = Depends(get_db),
+ ):
+-    await category_service.delete_category(db, user.user_id, category_id)
++    cid = int(category_id)
++    logger.debug("DELETE /category/%s: user_id=%s", cid, user.user_id)
++    await category_service.delete_category(db, user.user_id, cid)
+     return {"message": "删除成功"}
+diff --git a/backend/apps/api/note.py b/backend/apps/api/note.py
+index 6b6d249..79dc189 100644
+--- a/backend/apps/api/note.py
++++ b/backend/apps/api/note.py
+@@ -1,5 +1,6 @@
+-"""Note API endpoints — /note/v1/"""
++"""Note API endpoints — /v1/note/"""
+ 
++import logging
+ from typing import Optional
+ 
+ from fastapi import APIRouter, Depends, Query
+@@ -11,8 +12,11 @@ from backend.apps.service import note_service
+ from backend.apps.utils.database import get_db
+ from backend.apps.utils.exceptions import NotFoundError
+ from backend.apps.utils.security import get_current_user
++from backend.apps.utils.types import OptionalSnowflakeId, SnowflakeId
+ 
+-router = APIRouter(prefix="/note/v1", tags=["Note"])
++logger = logging.getLogger(__name__)
++
++router = APIRouter(prefix="/v1/note", tags=["Note"])
+ 
+ 
+ # ── Request / Response schemas ───────────────────────────────────────────────
+@@ -21,7 +25,7 @@ router = APIRouter(prefix="/note/v1", tags=["Note"])
+ class NoteCreateRequest(BaseModel):
+     note_title: str = Field(..., min_length=1, max_length=255, description="笔记标题")
+     note_content: Optional[str] = Field(None, description="Markdown内容")
+-    category_id: Optional[int] = Field(None, description="所属分类ID")
++    category_id: OptionalSnowflakeId = Field(None, description="所属分类ID")
+     note_tags: Optional[list[str]] = Field(None, description="标签列表")
+     is_pinned: int = Field(0, description="是否置顶(0-否 1-是)")
+ 
+@@ -29,16 +33,16 @@ class NoteCreateRequest(BaseModel):
+ class NoteUpdateRequest(BaseModel):
+     note_title: Optional[str] = Field(None, min_length=1, max_length=255, description="笔记标题")
+     note_content: Optional[str] = Field(None, description="Markdown内容")
+-    category_id: Optional[int] = Field(None, description="所属分类ID")
++    category_id: OptionalSnowflakeId = Field(None, description="所属分类ID")
+     note_summary: Optional[str] = Field(None, max_length=500, description="AI生成摘要")
+     note_tags: Optional[list[str]] = Field(None, description="标签列表")
+     is_pinned: Optional[int] = Field(None, description="是否置顶(0-否 1-是)")
+ 
+ 
+ class NoteResponse(BaseModel):
+-    note_id: int
+-    user_id: int
+-    category_id: Optional[int] = None
++    note_id: SnowflakeId
++    user_id: SnowflakeId
++    category_id: OptionalSnowflakeId = None
+     note_title: str
+     note_content: Optional[str] = None
+     note_summary: Optional[str] = None
+@@ -56,6 +60,17 @@ class NoteListResponse(BaseModel):
+     page_size: int
+ 
+ 
++class MoveNotesRequest(BaseModel):
++    note_ids: list[SnowflakeId] = Field(..., min_length=1, description="要移动的笔记ID列表")
++    category_id: OptionalSnowflakeId = Field(None, description="目标分类ID(None=移到未分类)")
++
++
++class MoveNotesResponse(BaseModel):
++    moved: int
++    total: int
++    category_id: OptionalSnowflakeId = None
++
++
+ # ── Endpoints ────────────────────────────────────────────────────────────────
+ 
+ 
+@@ -66,9 +81,12 @@ async def list_notes(
+     category_id: Optional[int] = Query(None, description="分类ID筛选"),
+     keyword: Optional[str] = Query(None, description="全文搜索关键词"),
+     is_pinned: Optional[int] = Query(None, description="是否置顶筛选"),
++    tag: Optional[str] = Query(None, description="标签筛选"),
+     user: User = Depends(get_current_user),
+     db: AsyncSession = Depends(get_db),
+ ):
++    logger.debug("GET /note: user_id=%s, page=%s, page_size=%s, category_id=%s, keyword=%r, is_pinned=%s, tag=%r",
++                 user.user_id, page, page_size, category_id, keyword, is_pinned, tag)
+     return await note_service.list_notes(
+         db=db,
+         user_id=user.user_id,
+@@ -77,16 +95,50 @@ async def list_notes(
+         category_id=category_id,
+         keyword=keyword,
+         is_pinned=is_pinned,
++        tag=tag,
++    )
++
++
++@router.get("/tags", response_model=list[str], summary="获取所有标签")
++async def list_tags(
++    user: User = Depends(get_current_user),
++    db: AsyncSession = Depends(get_db),
++):
++    """Return all distinct tags used across the current user's notes."""
++    logger.debug("GET /note/tags: user_id=%s", user.user_id)
++    return await note_service.list_tags(db, user.user_id)
++
++
++@router.post("/move", response_model=MoveNotesResponse, summary="移动笔记到指定分类")
++async def move_notes(
++    body: MoveNotesRequest,
++    user: User = Depends(get_current_user),
++    db: AsyncSession = Depends(get_db),
++):
++    """Move one or more notes to a target category (single note = list of one).
++    Pass category_id=null to move them to uncategorized.
++    """
++    note_ids = [int(nid) for nid in body.note_ids]
++    category_id = int(body.category_id) if body.category_id is not None else None
++    logger.debug("POST /note/move: user_id=%s, note_ids=%s, category_id=%s",
++                 user.user_id, note_ids, category_id)
++    return await note_service.move_notes(
++        db=db,
++        user_id=user.user_id,
++        note_ids=note_ids,
++        category_id=category_id,
+     )
+ 
+ 
+ @router.get("/{note_id}", response_model=NoteResponse, summary="获取笔记详情")
+ async def get_note(
+-    note_id: int,
++    note_id: str,
+     user: User = Depends(get_current_user),
+     db: AsyncSession = Depends(get_db),
+ ):
+-    result = await note_service.get_note(db, user.user_id, note_id)
++    nid = int(note_id)
++    logger.debug("GET /note/%s: user_id=%s", nid, user.user_id)
++    result = await note_service.get_note(db, user.user_id, nid)
+     if result is None:
+         raise NotFoundError("笔记不存在")
+     return result
+@@ -98,21 +150,23 @@ async def create_note(
+     user: User = Depends(get_current_user),
+     db: AsyncSession = Depends(get_db),
+ ):
++    category_id = int(body.category_id) if body.category_id is not None else None
++    logger.debug("POST /note: user_id=%s, title=%r, category_id=%s", user.user_id, body.note_title, category_id)
+     note = await note_service.create_note(
+         db=db,
+         user_id=user.user_id,
+         note_title=body.note_title,
+         note_content=body.note_content,
+-        category_id=body.category_id,
++        category_id=category_id,
+         note_tags=body.note_tags,
+         is_pinned=body.is_pinned,
+     )
+     return note_service._note_to_dict(note)
+ 
+ 
+-@router.put("/{note_id}", response_model=NoteResponse, summary="更新笔记")
++@router.post("/{note_id}/update", response_model=NoteResponse, summary="更新笔记")
+ async def update_note(
+-    note_id: int,
++    note_id: str,
+     body: NoteUpdateRequest,
+     user: User = Depends(get_current_user),
+     db: AsyncSession = Depends(get_db),
+@@ -120,20 +174,26 @@ async def update_note(
+     # exclude_unset: only pass fields the client actually sent, so omitting
+     # category_id leaves it unchanged instead of resetting it to NULL.
+     fields = body.model_dump(exclude_unset=True)
++    if "category_id" in fields and fields["category_id"] is not None:
++        fields["category_id"] = int(fields["category_id"])
++    nid = int(note_id)
++    logger.debug("PUT /note/%s: user_id=%s, fields=%s", nid, user.user_id, list(fields.keys()))
+     note = await note_service.update_note(
+         db=db,
+         user_id=user.user_id,
+-        note_id=note_id,
++        note_id=nid,
+         fields=fields,
+     )
+     return note_service._note_to_dict(note)
+ 
+ 
+-@router.delete("/{note_id}", summary="删除笔记")
++@router.post("/{note_id}/delete", summary="删除笔记")
+ async def delete_note(
+-    note_id: int,
++    note_id: str,
+     user: User = Depends(get_current_user),
+     db: AsyncSession = Depends(get_db),
+ ):
+-    await note_service.delete_note(db, user.user_id, note_id)
++    nid = int(note_id)
++    logger.debug("DELETE /note/%s: user_id=%s", nid, user.user_id)
++    await note_service.delete_note(db, user.user_id, nid)
+     return {"message": "删除成功"}
+diff --git a/backend/apps/model/category.py b/backend/apps/model/category.py
+index 2127130..afa1c84 100644
+--- a/backend/apps/model/category.py
++++ b/backend/apps/model/category.py
+@@ -1,6 +1,6 @@
+ """Category ORM model."""
+ 
+-from sqlalchemy import BigInteger, Integer, SmallInteger, String, UniqueConstraint
++from sqlalchemy import BigInteger, Index, Integer, SmallInteger, String, text
+ from sqlalchemy.orm import Mapped, mapped_column
+ 
+ from backend.apps.model.base import Base, TimestampMixin
+@@ -54,10 +54,15 @@ class Category(Base, TimestampMixin):
+     )
+ 
+     __table_args__ = (
+-        UniqueConstraint(
++        # Partial unique index: only enforce name uniqueness among non-deleted
++        # rows, so a soft-deleted category does not block recreating the same
++        # name. Mirrors migration 002's partial unique index.
++        Index(
++            "uq_category_user_name_parent",
+             "user_id",
+             "category_name",
+             "parent_id",
+-            name="uq_category_user_name_parent",
++            unique=True,
++            postgresql_where=text("is_deleted = 0"),
+         ),
+     )
+diff --git a/backend/apps/model/note.py b/backend/apps/model/note.py
+index ed4772c..259b175 100644
+--- a/backend/apps/model/note.py
++++ b/backend/apps/model/note.py
+@@ -51,7 +51,7 @@ class Note(Base, TimestampMixin):
+         nullable=True,
+         comment="AI生成摘要",
+     )
+-    note_tags: Mapped[dict | None] = mapped_column(
++    note_tags: Mapped[list | None] = mapped_column(
+         JSONB,
+         nullable=True,
+         default=list,
+@@ -95,4 +95,10 @@ class Note(Base, TimestampMixin):
+             "is_deleted",
+             "updated_at",
+         ),
++        # GIN index on note_tags for tag-based filtering (note_tags @> '["tag"]')
++        Index(
++            "ix_notes_note_tags",
++            "note_tags",
++            postgresql_using="gin",
++        ),
+     )
+diff --git a/backend/apps/model/user.py b/backend/apps/model/user.py
+index a37c634..4a3f4c3 100644
+--- a/backend/apps/model/user.py
++++ b/backend/apps/model/user.py
+@@ -1,9 +1,10 @@
+ """User ORM model."""
+ 
+-from sqlalchemy import BigInteger, SmallInteger, String
++from sqlalchemy import BigInteger, Index, SmallInteger, String
+ from sqlalchemy.orm import Mapped, mapped_column
+ 
+ from backend.apps.model.base import Base, TimestampMixin
++from backend.apps.model.role import ROLE_ID_USER
+ from backend.apps.utils.snowflake import snowflake_id
+ 
+ 
+@@ -32,6 +33,14 @@ class User(Base, TimestampMixin):
+         nullable=False,
+         comment="密码(bcrypt)",
+     )
++    role_id: Mapped[int] = mapped_column(
++        BigInteger,
++        nullable=False,
++        default=ROLE_ID_USER,
++        server_default="1",
++        index=True,
++        comment="角色ID(引用roles, 默认1=普通用户)",
++    )
+     is_active: Mapped[int] = mapped_column(
+         SmallInteger,
+         nullable=False,
+@@ -39,3 +48,7 @@ class User(Base, TimestampMixin):
+         server_default="1",
+         comment="是否启用(0-禁用 1-启用)",
+     )
++
++    __table_args__ = (
++        Index("ix_users_role_id", "role_id"),
++    )
+diff --git a/backend/apps/router/api_router.py b/backend/apps/router/api_router.py
+index 53dcf41..08a9248 100644
+--- a/backend/apps/router/api_router.py
++++ b/backend/apps/router/api_router.py
+@@ -2,6 +2,9 @@
+ 
+ from fastapi import APIRouter
+ 
++from backend.apps.api.ai_config import router as ai_config_router
++from backend.apps.api.ai_model import router as ai_model_router
++from backend.apps.api.ai_tool import router as ai_tool_router
+ from backend.apps.api.auth import router as auth_router
+ from backend.apps.api.category import router as category_router
+ from backend.apps.api.note import router as note_router
+@@ -10,3 +13,6 @@ api_router = APIRouter(prefix="/api")
+ api_router.include_router(auth_router)
+ api_router.include_router(category_router)
+ api_router.include_router(note_router)
++api_router.include_router(ai_model_router)
++api_router.include_router(ai_config_router)
++api_router.include_router(ai_tool_router)
+diff --git a/backend/apps/service/auth_service.py b/backend/apps/service/auth_service.py
+index 2f8d8a8..d641173 100644
+--- a/backend/apps/service/auth_service.py
++++ b/backend/apps/service/auth_service.py
+@@ -1,8 +1,11 @@
+ """Authentication business logic: register, login, refresh."""
+ 
++import logging
++
+ from sqlalchemy import select
+ from sqlalchemy.ext.asyncio import AsyncSession
+ 
++from backend.apps.model.role import ROLE_ID_ADMIN
+ from backend.apps.model.user import User
+ from backend.apps.utils.exceptions import BusinessError
+ from backend.apps.utils.security import (
+@@ -13,6 +16,8 @@ from backend.apps.utils.security import (
+     verify_password,
+ )
+ 
++logger = logging.getLogger(__name__)
++
+ 
+ def _build_token_payload(user: User) -> dict:
+     """Build the token response payload for a user."""
+@@ -35,10 +40,12 @@ async def register(
+ 
+     Raises BusinessError if the account already exists.
+     """
++    logger.debug("Register attempt: account=%s, name=%s", user_account, user_name)
+     result = await db.execute(
+         select(User).where(User.user_account == user_account)
+     )
+     if result.scalar_one_or_none() is not None:
++        logger.warning("Register failed: account=%s already exists", user_account)
+         raise BusinessError("账号已存在")
+ 
+     user = User(
+@@ -48,6 +55,7 @@ async def register(
+     )
+     db.add(user)
+     await db.flush()
++    logger.info("Register success: user_id=%s, account=%s", user.user_id, user_account)
+     return _build_token_payload(user)
+ 
+ 
+@@ -60,17 +68,21 @@ async def login(
+ 
+     Raises BusinessError on invalid credentials or disabled account.
+     """
++    logger.debug("Login attempt: account=%s", user_account)
+     result = await db.execute(
+         select(User).where(User.user_account == user_account)
+     )
+     user = result.scalar_one_or_none()
+ 
+     if user is None or user.is_active != 1:
++        logger.warning("Login failed: account=%s not found or inactive", user_account)
+         raise BusinessError("账号不存在或已禁用")
+ 
+     if not verify_password(password, user.user_password):
++        logger.warning("Login failed: wrong password for account=%s", user_account)
+         raise BusinessError("密码错误")
+ 
++    logger.info("Login success: user_id=%s, account=%s", user.user_id, user_account)
+     return _build_token_payload(user)
+ 
+ 
+@@ -84,6 +96,7 @@ async def refresh_access_token(
+     """
+     payload = decode_refresh_token(refresh_token)
+     if payload is None:
++        logger.warning("Refresh failed: invalid or expired refresh token")
+         raise BusinessError("Refresh token 无效或已过期")
+ 
+     user_id = int(payload["sub"])
+@@ -91,6 +104,45 @@ async def refresh_access_token(
+     user = result.scalar_one_or_none()
+ 
+     if user is None or user.is_active != 1:
++        logger.warning("Refresh failed: user_id=%s not found or inactive", user_id)
+         raise BusinessError("用户不存在或已禁用")
+ 
++    logger.info("Refresh success: user_id=%s", user_id)
+     return _build_token_payload(user)
++
++
++async def ensure_admin_account(
++    db: AsyncSession,
++    account: str,
++    password: str,
++) -> None:
++    """Ensure the bootstrap admin account exists and is an admin.
++
++    Called on startup. If the account does not exist it is created with the
++    admin role; if it exists, its role is forced to admin and its password is
++    reset to the configured value (per design: password is reset every start).
++    No-op when account/password are empty.
++    """
++    if not account or not password:
++        logger.warning("Admin bootstrap skipped: ADMIN_ACCOUNT/ADMIN_PASSWORD not set")
++        return
++
++    result = await db.execute(select(User).where(User.user_account == account))
++    user = result.scalar_one_or_none()
++    if user is None:
++        user = User(
++            user_account=account,
++            user_name="管理员",
++            user_password=hash_password(password),
++            role_id=ROLE_ID_ADMIN,
++        )
++        db.add(user)
++        logger.info("Admin bootstrap: created admin account=%s", account)
++    else:
++        user.role_id = ROLE_ID_ADMIN
++        user.user_password = hash_password(password)
++        if user.is_active != 1:
++            user.is_active = 1
++        logger.info("Admin bootstrap: ensured admin role + reset password for account=%s", account)
++
++    await db.flush()
+diff --git a/backend/apps/service/category_service.py b/backend/apps/service/category_service.py
+index 9a054d2..21ec5e5 100644
+--- a/backend/apps/service/category_service.py
++++ b/backend/apps/service/category_service.py
+@@ -1,25 +1,31 @@
+ """Category business logic: CRUD and tree assembly."""
+ 
++import logging
+ from typing import Any, Optional
+ 
+-from sqlalchemy import select
++from sqlalchemy import func, select
+ from sqlalchemy.ext.asyncio import AsyncSession
+ 
+ from backend.apps.model.category import Category
++from backend.apps.model.note import Note
+ from backend.apps.utils.exceptions import BusinessError, NotFoundError
+ 
++logger = logging.getLogger(__name__)
++
+ 
+ async def list_categories(
+     db: AsyncSession,
+     user_id: int,
+ ) -> list[dict]:
+     """Get all non-deleted categories for a user and assemble into tree."""
++    logger.debug("List categories: user_id=%s", user_id)
+     result = await db.execute(
+         select(Category)
+         .where(Category.user_id == user_id, Category.is_deleted == 0)
+         .order_by(Category.category_sort.asc(), Category.category_id.asc())
+     )
+     categories = result.scalars().all()
++    logger.debug("List categories: user_id=%s returned %d categories", user_id, len(categories))
+ 
+     # Build tree
+     node_map: dict[int, dict] = {}
+@@ -52,6 +58,7 @@ async def create_category(
+ 
+     Raises NotFoundError if the parent does not exist, BusinessError on name conflict.
+     """
++    logger.debug("Create category: user_id=%s, name=%s, parent_id=%s", user_id, category_name, parent_id)
+     # Validate parent exists and belongs to user
+     if parent_id is not None:
+         result = await db.execute(
+@@ -62,6 +69,7 @@ async def create_category(
+             )
+         )
+         if result.scalar_one_or_none() is None:
++            logger.warning("Create category failed: parent_id=%s not found (user_id=%s)", parent_id, user_id)
+             raise NotFoundError("父分类不存在")
+ 
+     # Check duplicate name under same parent
+@@ -74,6 +82,8 @@ async def create_category(
+         )
+     )
+     if result.scalar_one_or_none() is not None:
++        logger.warning("Create category failed: name=%s conflict under parent_id=%s (user_id=%s)",
++                       category_name, parent_id, user_id)
+         raise BusinessError("同一父分类下已存在同名分类")
+ 
+     category = Category(
+@@ -85,6 +95,8 @@ async def create_category(
+     )
+     db.add(category)
+     await db.flush()
++    logger.info("Create category success: category_id=%s, name=%s, user_id=%s",
++                category.category_id, category_name, user_id)
+     return category
+ 
+ 
+@@ -103,6 +115,7 @@ async def update_category(
+     Raises NotFoundError if the category/parent does not exist,
+     BusinessError on name conflict or invalid move.
+     """
++    logger.debug("Update category: category_id=%s, fields=%s, user_id=%s", category_id, list(fields.keys()), user_id)
+     result = await db.execute(
+         select(Category).where(
+             Category.category_id == category_id,
+@@ -112,6 +125,7 @@ async def update_category(
+     )
+     category = result.scalar_one_or_none()
+     if category is None:
++        logger.warning("Update category failed: category_id=%s not found (user_id=%s)", category_id, user_id)
+         raise NotFoundError("分类不存在")
+ 
+     # Determine the effective parent (new one if being changed, else current)
+@@ -130,6 +144,8 @@ async def update_category(
+             )
+         )
+         if dup_result.scalar_one_or_none() is not None:
++            logger.warning("Update category failed: name=%s conflict under parent_id=%s (user_id=%s)",
++                           new_name, effective_parent, user_id)
+             raise BusinessError("同一父分类下已存在同名分类")
+         category.category_name = new_name
+ 
+@@ -143,6 +159,7 @@ async def update_category(
+         new_parent = fields["parent_id"]
+         if new_parent is not None:
+             if new_parent == category_id:
++                logger.warning("Update category failed: self-parent attempted (category_id=%s)", category_id)
+                 raise BusinessError("不能将自己设为父分类")
+             result = await db.execute(
+                 select(Category).where(
+@@ -152,13 +169,17 @@ async def update_category(
+                 )
+             )
+             if result.scalar_one_or_none() is None:
++                logger.warning("Update category failed: parent_id=%s not found (user_id=%s)", new_parent, user_id)
+                 raise NotFoundError("父分类不存在")
+             # Prevent circular reference: new parent must not be a descendant
+             if await _is_descendant(db, user_id, category_id, new_parent):
++                logger.warning("Update category failed: circular move (category_id=%s -> parent_id=%s)",
++                               category_id, new_parent)
+                 raise BusinessError("不能将分类移动到自己的子分类下")
+         category.parent_id = new_parent
+ 
+     await db.flush()
++    logger.info("Update category success: category_id=%s, user_id=%s", category_id, user_id)
+     return category
+ 
+ 
+@@ -168,6 +189,7 @@ async def delete_category(
+     category_id: int,
+ ) -> None:
+     """Soft delete a category and all its descendants."""
++    logger.debug("Delete category: category_id=%s, user_id=%s", category_id, user_id)
+     result = await db.execute(
+         select(Category).where(
+             Category.category_id == category_id,
+@@ -177,13 +199,36 @@ async def delete_category(
+     )
+     category = result.scalar_one_or_none()
+     if category is None:
++        logger.warning("Delete category failed: category_id=%s not found (user_id=%s)", category_id, user_id)
+         raise NotFoundError("分类不存在")
+ 
+     # Collect all descendant IDs
+     all_ids = await _get_descendant_ids(db, user_id, category_id)
+     all_ids.add(category_id)
+ 
++    # Block deletion if any non-deleted notes live under this category or its
++    # descendants — otherwise those notes would be orphaned (category_id points
++    # at a soft-deleted category). The user must move or delete them first.
++    note_count_result = await db.execute(
++        select(func.count(Note.note_id)).where(
++            Note.user_id == user_id,
++            Note.category_id.in_(all_ids),
++            Note.is_deleted == 0,
++        )
++    )
++    note_count = note_count_result.scalar_one()
++    if note_count > 0:
++        logger.warning(
++            "Delete category blocked: %d notes under subtree (root_id=%s, user_id=%s)",
++            note_count, category_id, user_id,
++        )
++        raise BusinessError(
++            f"分类下存在 {note_count} 篇笔记，请先移动或删除笔记后再删除分类"
++        )
++
+     # Soft delete all
++    logger.info("Delete category: soft-deleting %d categories (root_id=%s, user_id=%s)",
++                len(all_ids), category_id, user_id)
+     for cid in all_ids:
+         r = await db.execute(
+             select(Category).where(Category.category_id == cid)
+diff --git a/backend/apps/service/note_service.py b/backend/apps/service/note_service.py
+index 0f8ae3b..634849e 100644
+--- a/backend/apps/service/note_service.py
++++ b/backend/apps/service/note_service.py
+@@ -9,13 +9,17 @@ Chinese full-text search:
+ """
+ 
+ from typing import Any, Optional
++import logging
+ 
+ import jieba
+-from sqlalchemy import ColumnElement, Select, func, select
++from sqlalchemy import ColumnElement, Select, func, literal_column, select
+ from sqlalchemy.ext.asyncio import AsyncSession
+ 
++from backend.apps.model.category import Category
+ from backend.apps.model.note import Note
+-from backend.apps.utils.exceptions import NotFoundError
++from backend.apps.utils.exceptions import BusinessError, NotFoundError
++
++logger = logging.getLogger(__name__)
+ 
+ # Text search configuration. 'simple' does no language-specific stemming and
+ # just lowercases tokens — exactly what we want for pre-segmented Chinese.
+@@ -39,13 +43,21 @@ def _build_search_vector(title: Optional[str], content: Optional[str]) -> Column
+     """Build a weighted tsvector SQL expression from segmented title + content.
+ 
+     Title gets weight 'A' (higher relevance), content gets weight 'B'.
++
++    The weight literals must be the PostgreSQL internal ``"char"`` type —
++    ``setweight(tsvector, "char")`` has no ``varchar`` overload, so passing a
++    plain Python ``"A"`` renders as ``$n::VARCHAR`` and raises
++    ``function setweight(tsvector, character varying) does not exist``.
+     """
+     seg_title = _segment(title)
+     seg_content = _segment(content)
++    # Weight 'A' for title, 'B' for content, cast to "char" literal.
++    weight_a = literal_column("'A'::\"char\"")
++    weight_b = literal_column("'B'::\"char\"")
+     return func.setweight(
+-        func.to_tsvector(_TS_CONFIG, seg_title), "A"
++        func.to_tsvector(_TS_CONFIG, seg_title), weight_a
+     ).op("||")(
+-        func.setweight(func.to_tsvector(_TS_CONFIG, seg_content), "B")
++        func.setweight(func.to_tsvector(_TS_CONFIG, seg_content), weight_b)
+     )
+ 
+ 
+@@ -57,11 +69,16 @@ async def list_notes(
+     category_id: Optional[int] = None,
+     keyword: Optional[str] = None,
+     is_pinned: Optional[int] = None,
++    tag: Optional[str] = None,
+ ) -> dict:
+     """
+-    List notes with pagination, optional category filter and full-text search.
++    List notes with pagination, optional category/tag filter and full-text search.
+     Returns {items, total, page, page_size}.
+     """
++    logger.debug(
++        "List notes: user_id=%s, page=%s, page_size=%s, category_id=%s, keyword=%r, is_pinned=%s, tag=%r",
++        user_id, page, page_size, category_id, keyword, is_pinned, tag,
++    )
+     base_query: Select = select(Note).where(
+         Note.user_id == user_id,
+         Note.is_deleted == 0,
+@@ -75,6 +92,11 @@ async def list_notes(
+     if is_pinned is not None:
+         base_query = base_query.where(Note.is_pinned == is_pinned)
+ 
++    # Tag filter: JSONB containment (note_tags @> '["tag"]'). Uses the GIN
++    # index ix_notes_note_tags.
++    if tag and tag.strip():
++        base_query = base_query.where(Note.note_tags.contains([tag.strip()]))
++
+     # Chinese full-text search: segment the keyword the same way as the index
+     if keyword and keyword.strip():
+         segmented = _segment(keyword.strip())
+@@ -98,6 +120,7 @@ async def list_notes(
+     result = await db.execute(order_query.offset(offset).limit(page_size))
+     notes = result.scalars().all()
+ 
++    logger.debug("List notes: user_id=%s, total=%s, returned=%d", user_id, total, len(notes))
+     return {
+         "items": [_note_to_dict(n) for n in notes],
+         "total": total,
+@@ -112,6 +135,7 @@ async def get_note(
+     note_id: int,
+ ) -> Optional[dict]:
+     """Get a single note by ID. Returns None if not found or deleted."""
++    logger.debug("Get note: note_id=%s, user_id=%s", note_id, user_id)
+     result = await db.execute(
+         select(Note).where(
+             Note.note_id == note_id,
+@@ -135,6 +159,7 @@ async def create_note(
+     is_pinned: int = 0,
+ ) -> Note:
+     """Create a new note and populate its search_vector."""
++    logger.debug("Create note: user_id=%s, title=%r, category_id=%s", user_id, note_title, category_id)
+     word_count = len(note_content) if note_content else 0
+     note = Note(
+         user_id=user_id,
+@@ -148,6 +173,8 @@ async def create_note(
+     )
+     db.add(note)
+     await db.flush()
++    logger.info("Create note success: note_id=%s, title=%r, user_id=%s",
++                note.note_id, note_title, user_id)
+     return note
+ 
+ 
+@@ -165,6 +192,7 @@ async def update_note(
+ 
+     Raises NotFoundError if the note does not exist.
+     """
++    logger.debug("Update note: note_id=%s, fields=%s, user_id=%s", note_id, list(fields.keys()), user_id)
+     result = await db.execute(
+         select(Note).where(
+             Note.note_id == note_id,
+@@ -174,6 +202,7 @@ async def update_note(
+     )
+     note = result.scalar_one_or_none()
+     if note is None:
++        logger.warning("Update note failed: note_id=%s not found (user_id=%s)", note_id, user_id)
+         raise NotFoundError("笔记不存在")
+ 
+     if "note_title" in fields:
+@@ -201,6 +230,7 @@ async def update_note(
+         note.search_vector = _build_search_vector(note.note_title, note.note_content)
+ 
+     await db.flush()
++    logger.info("Update note success: note_id=%s, user_id=%s", note_id, user_id)
+     return note
+ 
+ 
+@@ -210,6 +240,7 @@ async def delete_note(
+     note_id: int,
+ ) -> None:
+     """Soft delete a note."""
++    logger.debug("Delete note: note_id=%s, user_id=%s", note_id, user_id)
+     result = await db.execute(
+         select(Note).where(
+             Note.note_id == note_id,
+@@ -219,10 +250,91 @@ async def delete_note(
+     )
+     note = result.scalar_one_or_none()
+     if note is None:
++        logger.warning("Delete note failed: note_id=%s not found (user_id=%s)", note_id, user_id)
+         raise NotFoundError("笔记不存在")
+ 
+     note.is_deleted = 1
+     await db.flush()
++    logger.info("Delete note success: note_id=%s, user_id=%s", note_id, user_id)
++
++
++async def move_notes(
++    db: AsyncSession,
++    user_id: int,
++    note_ids: list[int],
++    category_id: Optional[int],
++) -> dict:
++    """Move one or more notes to a target category.
++
++    ``category_id=None`` moves them to "uncategorized". Validates that the
++    target category exists (and is not deleted) and that every note exists
++    and belongs to the user. Returns {moved, total, category_id}.
++    """
++    logger.debug("Move notes: note_ids=%s, category_id=%s, user_id=%s", note_ids, category_id, user_id)
++
++    if not note_ids:
++        raise BusinessError("笔记ID列表不能为空")
++
++    # Validate target category (unless moving to uncategorized)
++    if category_id is not None:
++        cat_result = await db.execute(
++            select(Category).where(
++                Category.category_id == category_id,
++                Category.user_id == user_id,
++                Category.is_deleted == 0,
++            )
++        )
++        if cat_result.scalar_one_or_none() is None:
++            logger.warning("Move notes failed: target category_id=%s not found (user_id=%s)",
++                           category_id, user_id)
++            raise NotFoundError("目标分类不存在")
++
++    # Fetch the notes to move
++    result = await db.execute(
++        select(Note).where(
++            Note.note_id.in_(note_ids),
++            Note.user_id == user_id,
++            Note.is_deleted == 0,
++        )
++    )
++    notes = result.scalars().all()
++
++    found_ids = {n.note_id for n in notes}
++    missing = set(note_ids) - found_ids
++    if missing:
++        logger.warning("Move notes failed: notes not found/not owned: %s (user_id=%s)",
++                       sorted(missing), user_id)
++        raise NotFoundError("部分笔记不存在或无权操作")
++
++    moved = 0
++    for note in notes:
++        if note.category_id != category_id:
++            note.category_id = category_id
++            moved += 1
++
++    await db.flush()
++    logger.info("Move notes success: moved %d/%d to category_id=%s (user_id=%s)",
++                moved, len(notes), category_id, user_id)
++    return {"moved": moved, "total": len(notes), "category_id": category_id}
++
++
++async def list_tags(
++    db: AsyncSession,
++    user_id: int,
++) -> list[str]:
++    """Return all distinct tags used across the user's non-deleted notes."""
++    logger.debug("List tags: user_id=%s", user_id)
++    result = await db.execute(
++        select(Note.note_tags).where(
++            Note.user_id == user_id,
++            Note.is_deleted == 0,
++        )
++    )
++    tags: set[str] = set()
++    for note_tags in result.scalars():
++        if note_tags:
++            tags.update(note_tags)
++    return sorted(tags)
+ 
+ 
+ # ── Helpers ──────────────────────────────────────────────────────────────────
+diff --git a/backend/apps/utils/config.py b/backend/apps/utils/config.py
+index b7ab1df..dc6fb91 100644
+--- a/backend/apps/utils/config.py
++++ b/backend/apps/utils/config.py
+@@ -39,11 +39,10 @@ class Settings(BaseSettings):
+     LOG_DIR: str = "pylogs"
+     DEBUG: bool = False
+ 
+-    # AI
+-    AI_TYPE: str = ""
+-    API_KEY: str = ""
+-    API_BASE: str = ""
+-    AI_MODEL: str = ""
++    # Admin account — auto-registered/ensured on startup (password reset each
++    # start). Leave empty to skip admin bootstrap.
++    ADMIN_ACCOUNT: str = ""
++    ADMIN_PASSWORD: str = ""
+ 
+     @property
+     def DATABASE_URL(self) -> str:
+diff --git a/backend/apps/utils/database.py b/backend/apps/utils/database.py
+index b9e5e21..a337191 100644
+--- a/backend/apps/utils/database.py
++++ b/backend/apps/utils/database.py
+@@ -1,5 +1,6 @@
+ """Async database engine, session factory, and FastAPI dependency."""
+ 
++import logging
+ from collections.abc import AsyncGenerator
+ 
+ from sqlalchemy.ext.asyncio import (
+@@ -10,11 +11,18 @@ from sqlalchemy.ext.asyncio import (
+ 
+ from backend.apps.utils.config import settings
+ 
++logger = logging.getLogger(__name__)
++
+ engine = create_async_engine(
+     settings.DATABASE_URL,
+     echo=settings.DEBUG,
+     pool_size=10,
+     max_overflow=20,
++    # Tables live in a non-default schema (DB_SCHEMA, e.g. "note_db"). The
++    # server's search_path does not include it, so asyncpg must be told to set
++    # it per connection — otherwise unqualified table names (e.g. "users")
++    # raise UndefinedTableError. asyncpg applies server_settings on connect.
++    connect_args={"server_settings": {"search_path": settings.DB_SCHEMA}},
+ )
+ 
+ AsyncSessionLocal = async_sessionmaker(
+@@ -31,5 +39,6 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
+             yield session
+             await session.commit()
+         except Exception:
++            logger.warning("DB session rolled back due to exception", exc_info=True)
+             await session.rollback()
+             raise
+diff --git a/backend/apps/utils/exceptions.py b/backend/apps/utils/exceptions.py
+index a5457ae..0b53d72 100644
+--- a/backend/apps/utils/exceptions.py
++++ b/backend/apps/utils/exceptions.py
+@@ -1,8 +1,9 @@
+ """Application business exceptions.
+ 
+ Mapping to HTTP status codes is handled by exception handlers in main.py:
+-  - BusinessError  -> 400 (business rule violation, e.g. duplicate name)
+-  - NotFoundError  -> 404 (resource does not exist)
++  - BusinessError   -> 400 (business rule violation, e.g. duplicate name)
++  - NotFoundError   -> 404 (resource does not exist)
++  - ForbiddenError  -> 403 (insufficient permissions, e.g. non-admin)
+   - Any other uncaught Exception -> 500 (unexpected code error)
+ """
+ 
+@@ -19,3 +20,11 @@ class NotFoundError(BusinessError):
+     """A requested resource does not exist. Maps to HTTP 404."""
+ 
+     pass
++
++
++class ForbiddenError(Exception):
++    """The caller lacks permission for this action. Maps to HTTP 403."""
++
++    def __init__(self, message: str = "需要管理员权限"):
++        self.message = message
++        super().__init__(message)
+diff --git a/backend/apps/utils/security.py b/backend/apps/utils/security.py
+index f67b6a5..bdea03a 100644
+--- a/backend/apps/utils/security.py
++++ b/backend/apps/utils/security.py
+@@ -1,5 +1,6 @@
+ """JWT token utilities, password hashing, and FastAPI auth dependency."""
+ 
++import logging
+ from datetime import datetime, timedelta, timezone
+ from typing import Optional
+ 
+@@ -9,9 +10,13 @@ from fastapi import Depends, HTTPException, Request
+ from sqlalchemy import select
+ from sqlalchemy.ext.asyncio import AsyncSession
+ 
++from backend.apps.model.role import ROLE_ID_ADMIN
+ from backend.apps.model.user import User
+ from backend.apps.utils.config import settings
+ from backend.apps.utils.database import get_db
++from backend.apps.utils.exceptions import ForbiddenError
++
++logger = logging.getLogger(__name__)
+ 
+ 
+ # Password hashing — using bcrypt directly (passlib has compat issues with bcrypt 5.x)
+@@ -62,11 +67,14 @@ def decode_access_token(token: str) -> Optional[dict]:
+             token, settings.ACCESS_JWT_SECRET, algorithms=["HS256"]
+         )
+         if payload.get("type") != "access":
++            logger.warning("Access token rejected: wrong type")
+             return None
+         return payload
+     except jwt.ExpiredSignatureError:
++        logger.warning("Access token rejected: expired")
+         return None
+-    except jwt.InvalidTokenError:
++    except jwt.InvalidTokenError as e:
++        logger.warning("Access token rejected: invalid (%s)", e)
+         return None
+ 
+ 
+@@ -77,11 +85,14 @@ def decode_refresh_token(token: str) -> Optional[dict]:
+             token, settings.REFRESH_JWT_SECRET, algorithms=["HS256"]
+         )
+         if payload.get("type") != "refresh":
++            logger.warning("Refresh token rejected: wrong type")
+             return None
+         return payload
+     except jwt.ExpiredSignatureError:
++        logger.warning("Refresh token rejected: expired")
+         return None
+-    except jwt.InvalidTokenError:
++    except jwt.InvalidTokenError as e:
++        logger.warning("Refresh token rejected: invalid (%s)", e)
+         return None
+ 
+ 
+@@ -96,11 +107,15 @@ async def get_current_user(
+     """
+     auth_header = request.headers.get("Authorization", "")
+     if not auth_header.startswith("Bearer "):
++        logger.warning("Auth failed: missing or malformed Authorization header on %s %s",
++                       request.method, request.url.path)
+         raise HTTPException(status_code=401, detail="Missing or invalid token")
+ 
+     token = auth_header[7:]
+     payload = decode_access_token(token)
+     if payload is None:
++        logger.warning("Auth failed: invalid or expired access token on %s %s",
++                       request.method, request.url.path)
+         raise HTTPException(status_code=401, detail="Invalid or expired token")
+ 
+     user_id = int(payload["sub"])
+@@ -108,6 +123,7 @@ async def get_current_user(
+     user = result.scalar_one_or_none()
+ 
+     if user is None or user.is_active != 1:
++        logger.warning("Auth failed: user_id=%s not found or inactive", user_id)
+         raise HTTPException(status_code=401, detail="User not found or inactive")
+ 
+     # Sliding refresh: issue a new access token on every valid request
+@@ -116,4 +132,17 @@ async def get_current_user(
+     # Attach the new token so the API layer can add it to response headers
+     request.state.new_access_token = new_access_token
+ 
++    logger.debug("Authenticated user_id=%s on %s %s", user.user_id, request.method, request.url.path)
++    return user
++
++
++async def get_current_admin(user: User = Depends(get_current_user)) -> User:
++    """Dependency that requires the caller to be an admin (role_id == admin).
++
++    Raises ForbiddenError (→403) for non-admin users.
++    """
++    if user.role_id != ROLE_ID_ADMIN:
++        logger.warning("Forbidden: user_id=%s (role_id=%s) attempted admin endpoint on %s",
++                       user.user_id, user.role_id, "admin-endpoint")
++        raise ForbiddenError("需要管理员权限")
+     return user
+diff --git a/backend/apps/utils/snowflake.py b/backend/apps/utils/snowflake.py
+index 5f65582..04c5bad 100644
+--- a/backend/apps/utils/snowflake.py
++++ b/backend/apps/utils/snowflake.py
+@@ -9,10 +9,13 @@ Epoch: 2024-01-01 00:00:00 UTC
+ 
+ import time
+ import threading
++import logging
+ 
+ # Epoch: 2024-01-01 00:00:00 UTC
+ EPOCH = 1704067200000
+ 
++logger = logging.getLogger(__name__)
++
+ # Bit lengths
+ MACHINE_ID_BITS = 10
+ SEQUENCE_BITS = 12
+@@ -53,6 +56,10 @@ class SnowflakeGenerator:
+             timestamp = self._current_millis()
+ 
+             if timestamp < self.last_timestamp:
++                logger.error(
++                    "Clock moved backwards: last=%s now=%s (diff=%sms)",
++                    self.last_timestamp, timestamp, self.last_timestamp - timestamp,
++                )
+                 raise RuntimeError(
+                     f"Clock moved backwards. Refusing to generate id for "
+                     f"{self.last_timestamp - timestamp} milliseconds"
+diff --git a/backend/main.py b/backend/main.py
+index a33f253..f21933a 100644
+--- a/backend/main.py
++++ b/backend/main.py
+@@ -1,6 +1,7 @@
+ """FastAPI application entry point."""
+ 
+ import logging
++import time
+ from contextlib import asynccontextmanager
+ 
+ from fastapi import FastAPI, Request
+@@ -8,9 +9,10 @@ from fastapi.middleware.cors import CORSMiddleware
+ from fastapi.responses import JSONResponse
+ 
+ from backend.apps.router.api_router import api_router
++from backend.apps.service import auth_service
+ from backend.apps.utils.config import settings
+-from backend.apps.utils.database import engine
+-from backend.apps.utils.exceptions import BusinessError, NotFoundError
++from backend.apps.utils.database import AsyncSessionLocal, engine
++from backend.apps.utils.exceptions import BusinessError, ForbiddenError, NotFoundError
+ from backend.apps.utils.logger import new_trace_id, setup_logging
+ 
+ logger = logging.getLogger(__name__)
+@@ -21,6 +23,23 @@ async def lifespan(app: FastAPI):
+     # Startup
+     setup_logging()
+     logger.info("Application starting...")
++
++    # Bootstrap admin account (create if missing, else reset password + force
++    # admin role). Tolerates DB being unavailable so the app can still boot.
++    if settings.ADMIN_ACCOUNT and settings.ADMIN_PASSWORD:
++        try:
++            async with AsyncSessionLocal() as session:
++                await auth_service.ensure_admin_account(
++                    db=session,
++                    account=settings.ADMIN_ACCOUNT,
++                    password=settings.ADMIN_PASSWORD,
++                )
++                await session.commit()
++        except Exception:
++            logger.exception("Admin bootstrap failed; continuing startup")
++    else:
++        logger.warning("Admin bootstrap skipped: ADMIN_ACCOUNT/ADMIN_PASSWORD not configured")
++
+     yield
+     # Shutdown
+     logger.info("Application shutting down...")
+@@ -50,13 +69,23 @@ async def trace_and_sliding_middleware(request: Request, call_next):
+     """Combined middleware:
+     1. Assign a trace_id for every request (for log correlation)
+     2. Attach new access token to response header (sliding refresh)
++    3. Log the request lifecycle (method, path, status, duration)
+     """
+     # Generate trace_id for this request
+     trace_id = new_trace_id()
+     request.state.trace_id = trace_id
+ 
++    start = time.perf_counter()
++    logger.info("Request start: %s %s", request.method, request.url.path)
++    try:
++        response = await call_next(request)
++    except Exception:
++        duration_ms = (time.perf_counter() - start) * 1000
++        logger.exception("Request error: %s %s (%.1fms)", request.method, request.url.path, duration_ms)
++        raise
++
++    duration_ms = (time.perf_counter() - start) * 1000
+     # Add trace_id to response header for client-side debugging
+-    response = await call_next(request)
+     response.headers["X-Trace-Id"] = trace_id
+ 
+     # Sliding refresh: attach new access token if generated
+@@ -64,6 +93,8 @@ async def trace_and_sliding_middleware(request: Request, call_next):
+     if new_token:
+         response.headers["X-Access-Token"] = new_token
+ 
++    logger.info("Request end: %s %s -> %d (%.1fms)", request.method, request.url.path,
++                response.status_code, duration_ms)
+     return response
+ 
+ 
+@@ -75,12 +106,21 @@ async def trace_and_sliding_middleware(request: Request, call_next):
+ @app.exception_handler(NotFoundError)
+ async def not_found_handler(request: Request, exc: NotFoundError):
+     """Resource does not exist → 404."""
++    logger.warning("NotFound %s %s: %s", request.method, request.url.path, exc.message)
+     return JSONResponse(status_code=404, content={"detail": exc.message})
+ 
+ 
++@app.exception_handler(ForbiddenError)
++async def forbidden_handler(request: Request, exc: ForbiddenError):
++    """Caller lacks permission → 403."""
++    logger.warning("Forbidden %s %s: %s", request.method, request.url.path, exc.message)
++    return JSONResponse(status_code=403, content={"detail": exc.message})
++
++
+ @app.exception_handler(BusinessError)
+ async def business_error_handler(request: Request, exc: BusinessError):
+     """Business rule violation → 400."""
++    logger.warning("BusinessError %s %s: %s", request.method, request.url.path, exc.message)
+     return JSONResponse(status_code=400, content={"detail": exc.message})
+ 
+ 
+diff --git a/frontend/index.html b/frontend/index.html
+index 096d706..10d9a0f 100644
+--- a/frontend/index.html
++++ b/frontend/index.html
+@@ -1,10 +1,10 @@
+ <!doctype html>
+-<html lang="en">
++<html lang="zh-CN">
+   <head>
+     <meta charset="UTF-8" />
+     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+-    <title>frontend</title>
++    <title>智能笔记 — AI Note</title>
+   </head>
+   <body>
+     <div id="app"></div>
+diff --git a/frontend/public/favicon.svg b/frontend/public/favicon.svg
+index 6893eb1..b06a726 100644
+--- a/frontend/public/favicon.svg
++++ b/frontend/public/favicon.svg
+@@ -1 +1,30 @@
+-<svg xmlns="http://www.w3.org/2000/svg" width="48" height="46" fill="none" viewBox="0 0 48 46"><path fill="#863bff" d="M25.946 44.938c-.664.845-2.021.375-2.021-.698V33.937a2.26 2.26 0 0 0-2.262-2.262H10.287c-.92 0-1.456-1.04-.92-1.788l7.48-10.471c1.07-1.497 0-3.578-1.842-3.578H1.237c-.92 0-1.456-1.04-.92-1.788L10.013.474c.214-.297.556-.474.92-.474h28.894c.92 0 1.456 1.04.92 1.788l-7.48 10.471c-1.07 1.498 0 3.579 1.842 3.579h11.377c.943 0 1.473 1.088.89 1.83L25.947 44.94z" style="fill:#863bff;fill:color(display-p3 .5252 .23 1);fill-opacity:1"/><mask id="a" width="48" height="46" x="0" y="0" maskUnits="userSpaceOnUse" style="mask-type:alpha"><path fill="#000" d="M25.842 44.938c-.664.844-2.021.375-2.021-.698V33.937a2.26 2.26 0 0 0-2.262-2.262H10.183c-.92 0-1.456-1.04-.92-1.788l7.48-10.471c1.07-1.498 0-3.579-1.842-3.579H1.133c-.92 0-1.456-1.04-.92-1.787L9.91.473c.214-.297.556-.474.92-.474h28.894c.92 0 1.456 1.04.92 1.788l-7.48 10.471c-1.07 1.498 0 3.578 1.842 3.578h11.377c.943 0 1.473 1.088.89 1.832L25.843 44.94z" style="fill:#000;fill-opacity:1"/></mask><g mask="url(#a)"><g filter="url(#b)"><ellipse cx="5.508" cy="14.704" fill="#ede6ff" rx="5.508" ry="14.704" style="fill:#ede6ff;fill:color(display-p3 .9275 .9033 1);fill-opacity:1" transform="matrix(.00324 1 1 -.00324 -4.47 31.516)"/></g><g filter="url(#c)"><ellipse cx="10.399" cy="29.851" fill="#ede6ff" rx="10.399" ry="29.851" style="fill:#ede6ff;fill:color(display-p3 .9275 .9033 1);fill-opacity:1" transform="matrix(.00324 1 1 -.00324 -39.328 7.883)"/></g><g filter="url(#d)"><ellipse cx="5.508" cy="30.487" fill="#7e14ff" rx="5.508" ry="30.487" style="fill:#7e14ff;fill:color(display-p3 .4922 .0767 1);fill-opacity:1" transform="rotate(89.814 -25.913 -14.639)scale(1 -1)"/></g><g filter="url(#e)"><ellipse cx="5.508" cy="30.599" fill="#7e14ff" rx="5.508" ry="30.599" style="fill:#7e14ff;fill:color(display-p3 .4922 .0767 1);fill-opacity:1" transform="rotate(89.814 -32.644 -3.334)scale(1 -1)"/></g><g filter="url(#f)"><ellipse cx="5.508" cy="30.599" fill="#7e14ff" rx="5.508" ry="30.599" style="fill:#7e14ff;fill:color(display-p3 .4922 .0767 1);fill-opacity:1" transform="matrix(.00324 1 1 -.00324 -34.34 30.47)"/></g><g filter="url(#g)"><ellipse cx="14.072" cy="22.078" fill="#ede6ff" rx="14.072" ry="22.078" style="fill:#ede6ff;fill:color(display-p3 .9275 .9033 1);fill-opacity:1" transform="rotate(93.35 24.506 48.493)scale(-1 1)"/></g><g filter="url(#h)"><ellipse cx="3.47" cy="21.501" fill="#7e14ff" rx="3.47" ry="21.501" style="fill:#7e14ff;fill:color(display-p3 .4922 .0767 1);fill-opacity:1" transform="rotate(89.009 28.708 47.59)scale(-1 1)"/></g><g filter="url(#i)"><ellipse cx="3.47" cy="21.501" fill="#7e14ff" rx="3.47" ry="21.501" style="fill:#7e14ff;fill:color(display-p3 .4922 .0767 1);fill-opacity:1" transform="rotate(89.009 28.708 47.59)scale(-1 1)"/></g><g filter="url(#j)"><ellipse cx=".387" cy="8.972" fill="#7e14ff" rx="4.407" ry="29.108" style="fill:#7e14ff;fill:color(display-p3 .4922 .0767 1);fill-opacity:1" transform="rotate(39.51 .387 8.972)"/></g><g filter="url(#k)"><ellipse cx="47.523" cy="-6.092" fill="#7e14ff" rx="4.407" ry="29.108" style="fill:#7e14ff;fill:color(display-p3 .4922 .0767 1);fill-opacity:1" transform="rotate(37.892 47.523 -6.092)"/></g><g filter="url(#l)"><ellipse cx="41.412" cy="6.333" fill="#47bfff" rx="5.971" ry="9.665" style="fill:#47bfff;fill:color(display-p3 .2799 .748 1);fill-opacity:1" transform="rotate(37.892 41.412 6.333)"/></g><g filter="url(#m)"><ellipse cx="-1.879" cy="38.332" fill="#7e14ff" rx="4.407" ry="29.108" style="fill:#7e14ff;fill:color(display-p3 .4922 .0767 1);fill-opacity:1" transform="rotate(37.892 -1.88 38.332)"/></g><g filter="url(#n)"><ellipse cx="-1.879" cy="38.332" fill="#7e14ff" rx="4.407" ry="29.108" style="fill:#7e14ff;fill:color(display-p3 .4922 .0767 1);fill-opacity:1" transform="rotate(37.892 -1.88 38.332)"/></g><g filter="url(#o)"><ellipse cx="35.651" cy="29.907" fill="#7e14ff" rx="4.407" ry="29.108" style="fill:#7e14ff;fill:color(display-p3 .4922 .0767 1);fill-opacity:1" transform="rotate(37.892 35.651 29.907)"/></g><g filter="url(#p)"><ellipse cx="38.418" cy="32.4" fill="#47bfff" rx="5.971" ry="15.297" style="fill:#47bfff;fill:color(display-p3 .2799 .748 1);fill-opacity:1" transform="rotate(37.892 38.418 32.4)"/></g></g><defs><filter id="b" width="60.045" height="41.654" x="-19.77" y="16.149" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17158" stdDeviation="7.659"/></filter><filter id="c" width="90.34" height="51.437" x="-54.613" y="-7.533" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17158" stdDeviation="7.659"/></filter><filter id="d" width="79.355" height="29.4" x="-49.64" y="2.03" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17158" stdDeviation="4.596"/></filter><filter id="e" width="79.579" height="29.4" x="-45.045" y="20.029" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17158" stdDeviation="4.596"/></filter><filter id="f" width="79.579" height="29.4" x="-43.513" y="21.178" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17158" stdDeviation="4.596"/></filter><filter id="g" width="74.749" height="58.852" x="15.756" y="-17.901" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17158" stdDeviation="7.659"/></filter><filter id="h" width="61.377" height="25.362" x="23.548" y="2.284" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17158" stdDeviation="4.596"/></filter><filter id="i" width="61.377" height="25.362" x="23.548" y="2.284" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17158" stdDeviation="4.596"/></filter><filter id="j" width="56.045" height="63.649" x="-27.636" y="-22.853" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17158" stdDeviation="4.596"/></filter><filter id="k" width="54.814" height="64.646" x="20.116" y="-38.415" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17158" stdDeviation="4.596"/></filter><filter id="l" width="33.541" height="35.313" x="24.641" y="-11.323" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17158" stdDeviation="4.596"/></filter><filter id="m" width="54.814" height="64.646" x="-29.286" y="6.009" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17158" stdDeviation="4.596"/></filter><filter id="n" width="54.814" height="64.646" x="-29.286" y="6.009" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17158" stdDeviation="4.596"/></filter><filter id="o" width="54.814" height="64.646" x="8.244" y="-2.416" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17158" stdDeviation="4.596"/></filter><filter id="p" width="39.409" height="43.623" x="18.713" y="10.588" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17158" stdDeviation="4.596"/></filter></defs></svg>
+\ No newline at end of file
++<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" fill="none">
++  <defs>
++    <!-- Brand gradient: cool sky-blue -> indigo, matches the app accent + avatar gradient -->
++    <linearGradient id="bg" x1="6" y1="6" x2="58" y2="58" gradientUnits="userSpaceOnUse">
++      <stop stop-color="#0ea5e9"/>
++      <stop offset="1" stop-color="#6366f1"/>
++    </linearGradient>
++    <linearGradient id="paper" x1="14" y1="18" x2="42" y2="54" gradientUnits="userSpaceOnUse">
++      <stop stop-color="#ffffff"/>
++      <stop offset="1" stop-color="#eef6ff"/>
++    </linearGradient>
++  </defs>
++
++  <!-- App tile -->
++  <rect x="2" y="2" width="60" height="60" rx="14" fill="url(#bg)"/>
++
++  <!-- Note / document -->
++  <rect x="14" y="18" width="28" height="36" rx="4" fill="url(#paper)"/>
++  <!-- folded corner -->
++  <path d="M36 18h6v6a6 6 0 0 1-6-6Z" fill="#cfe4f7"/>
++
++  <!-- text lines: title (accent) + body -->
++  <rect x="20" y="27" width="16" height="2.8" rx="1.4" fill="#0284c7"/>
++  <rect x="20" y="34" width="18" height="2.8" rx="1.4" fill="#94a3b8"/>
++  <rect x="20" y="41" width="12" height="2.8" rx="1.4" fill="#94a3b8"/>
++
++  <!-- AI sparkles (gold), seated above / beside the note so they read clearly at small sizes -->
++  <path d="M47 7 Q47 13 53 13 Q47 13 47 19 Q47 13 41 13 Q47 13 47 7 Z" fill="#fbbf24"/>
++  <path d="M52 24 Q52 27 55 27 Q52 27 52 30 Q52 27 49 27 Q52 27 52 24 Z" fill="#fcd34d"/>
++</svg>
+diff --git a/frontend/public/icons.svg b/frontend/public/icons.svg
+deleted file mode 100644
+index e952219..0000000
+--- a/frontend/public/icons.svg
++++ /dev/null
+@@ -1,24 +0,0 @@
+-<svg xmlns="http://www.w3.org/2000/svg">
+-  <symbol id="bluesky-icon" viewBox="0 0 16 17">
+-    <g clip-path="url(#bluesky-clip)"><path fill="#08060d" d="M7.75 7.735c-.693-1.348-2.58-3.86-4.334-5.097-1.68-1.187-2.32-.981-2.74-.79C.188 2.065.1 2.812.1 3.251s.241 3.602.398 4.13c.52 1.744 2.367 2.333 4.07 2.145-2.495.37-4.71 1.278-1.805 4.512 3.196 3.309 4.38-.71 4.987-2.746.608 2.036 1.307 5.91 4.93 2.746 2.72-2.746.747-4.143-1.747-4.512 1.702.189 3.55-.4 4.07-2.145.156-.528.397-3.691.397-4.13s-.088-1.186-.575-1.406c-.42-.19-1.06-.395-2.741.79-1.755 1.24-3.64 3.752-4.334 5.099"/></g>
+-    <defs><clipPath id="bluesky-clip"><path fill="#fff" d="M.1.85h15.3v15.3H.1z"/></clipPath></defs>
+-  </symbol>
+-  <symbol id="discord-icon" viewBox="0 0 20 19">
+-    <path fill="#08060d" d="M16.224 3.768a14.5 14.5 0 0 0-3.67-1.153c-.158.286-.343.67-.47.976a13.5 13.5 0 0 0-4.067 0c-.128-.306-.317-.69-.476-.976A14.4 14.4 0 0 0 3.868 3.77C1.546 7.28.916 10.703 1.231 14.077a14.7 14.7 0 0 0 4.5 2.306q.545-.748.965-1.587a9.5 9.5 0 0 1-1.518-.74q.191-.14.372-.293c2.927 1.369 6.107 1.369 8.999 0q.183.152.372.294-.723.437-1.52.74.418.838.963 1.588a14.6 14.6 0 0 0 4.504-2.308c.37-3.911-.63-7.302-2.644-10.309m-9.13 8.234c-.878 0-1.599-.82-1.599-1.82 0-.998.705-1.82 1.6-1.82.894 0 1.614.82 1.599 1.82.001 1-.705 1.82-1.6 1.82m5.91 0c-.878 0-1.599-.82-1.599-1.82 0-.998.705-1.82 1.6-1.82.893 0 1.614.82 1.599 1.82 0 1-.706 1.82-1.6 1.82"/>
+-  </symbol>
+-  <symbol id="documentation-icon" viewBox="0 0 21 20">
+-    <path fill="none" stroke="#aa3bff" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.35" d="m15.5 13.333 1.533 1.322c.645.555.967.833.967 1.178s-.322.623-.967 1.179L15.5 18.333m-3.333-5-1.534 1.322c-.644.555-.966.833-.966 1.178s.322.623.966 1.179l1.534 1.321"/>
+-    <path fill="none" stroke="#aa3bff" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.35" d="M17.167 10.836v-4.32c0-1.41 0-2.117-.224-2.68-.359-.906-1.118-1.621-2.08-1.96-.599-.21-1.349-.21-2.848-.21-2.623 0-3.935 0-4.983.369-1.684.591-3.013 1.842-3.641 3.428C3 6.449 3 7.684 3 10.154v2.122c0 2.558 0 3.838.706 4.726q.306.383.713.671c.76.536 1.79.64 3.581.66"/>
+-    <path fill="none" stroke="#aa3bff" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.35" d="M3 10a2.78 2.78 0 0 1 2.778-2.778c.555 0 1.209.097 1.748-.047.48-.129.854-.503.982-.982.145-.54.048-1.194.048-1.749a2.78 2.78 0 0 1 2.777-2.777"/>
+-  </symbol>
+-  <symbol id="github-icon" viewBox="0 0 19 19">
+-    <path fill="#08060d" fill-rule="evenodd" d="M9.356 1.85C5.05 1.85 1.57 5.356 1.57 9.694a7.84 7.84 0 0 0 5.324 7.44c.387.079.528-.168.528-.376 0-.182-.013-.805-.013-1.454-2.165.467-2.616-.935-2.616-.935-.349-.91-.864-1.143-.864-1.143-.71-.48.051-.48.051-.48.787.051 1.2.805 1.2.805.695 1.194 1.817.857 2.268.649.064-.507.27-.857.49-1.052-1.728-.182-3.545-.857-3.545-3.87 0-.857.31-1.558.8-2.104-.078-.195-.349-1 .077-2.078 0 0 .657-.208 2.14.805a7.5 7.5 0 0 1 1.946-.26c.657 0 1.328.092 1.946.26 1.483-1.013 2.14-.805 2.14-.805.426 1.078.155 1.883.078 2.078.502.546.799 1.247.799 2.104 0 3.013-1.818 3.675-3.558 3.87.284.247.528.714.528 1.454 0 1.052-.012 1.896-.012 2.156 0 .208.142.455.528.377a7.84 7.84 0 0 0 5.324-7.441c.013-4.338-3.48-7.844-7.773-7.844" clip-rule="evenodd"/>
+-  </symbol>
+-  <symbol id="social-icon" viewBox="0 0 20 20">
+-    <path fill="none" stroke="#aa3bff" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.35" d="M12.5 6.667a4.167 4.167 0 1 0-8.334 0 4.167 4.167 0 0 0 8.334 0"/>
+-    <path fill="none" stroke="#aa3bff" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.35" d="M2.5 16.667a5.833 5.833 0 0 1 8.75-5.053m3.837.474.513 1.035c.07.144.257.282.414.309l.93.155c.596.1.736.536.307.965l-.723.73a.64.64 0 0 0-.152.531l.207.903c.164.715-.213.991-.84.618l-.872-.52a.63.63 0 0 0-.577 0l-.872.52c-.624.373-1.003.094-.84-.618l.207-.903a.64.64 0 0 0-.152-.532l-.723-.729c-.426-.43-.289-.864.306-.964l.93-.156a.64.64 0 0 0 .412-.31l.513-1.034c.28-.562.735-.562 1.012 0"/>
+-  </symbol>
+-  <symbol id="x-icon" viewBox="0 0 19 19">
+-    <path fill="#08060d" fill-rule="evenodd" d="M1.893 1.98c.052.072 1.245 1.769 2.653 3.77l2.892 4.114c.183.261.333.48.333.486s-.068.089-.152.183l-.522.593-.765.867-3.597 4.087c-.375.426-.734.834-.798.905a1 1 0 0 0-.118.148c0 .01.236.017.664.017h.663l.729-.83c.4-.457.796-.906.879-.999a692 692 0 0 0 1.794-2.038c.034-.037.301-.34.594-.675l.551-.624.345-.392a7 7 0 0 1 .34-.374c.006 0 .93 1.306 2.052 2.903l2.084 2.965.045.063h2.275c1.87 0 2.273-.003 2.266-.021-.008-.02-1.098-1.572-3.894-5.547-2.013-2.862-2.28-3.246-2.273-3.266.008-.019.282-.332 2.085-2.38l2-2.274 1.567-1.782c.022-.028-.016-.03-.65-.03h-.674l-.3.342a871 871 0 0 1-1.782 2.025c-.067.075-.405.458-.75.852a100 100 0 0 1-.803.91c-.148.172-.299.344-.99 1.127-.304.343-.32.358-.345.327-.015-.019-.904-1.282-1.976-2.808L6.365 1.85H1.8zm1.782.91 8.078 11.294c.772 1.08 1.413 1.973 1.425 1.984.016.017.241.02 1.05.017l1.03-.004-2.694-3.766L7.796 5.75 5.722 2.852l-1.039-.004-1.039-.004z" clip-rule="evenodd"/>
+-  </symbol>
+-</svg>
+diff --git a/frontend/src/App.vue b/frontend/src/App.vue
+index 36efb52..a78fb6f 100644
+--- a/frontend/src/App.vue
++++ b/frontend/src/App.vue
+@@ -1,7 +1,7 @@
+ <script setup lang="ts">
+-
++import { RouterView } from 'vue-router'
+ </script>
+ 
+ <template>
+-
++  <RouterView />
+ </template>
+diff --git a/frontend/src/main.ts b/frontend/src/main.ts
+index 2425c0f..6a92eff 100644
+--- a/frontend/src/main.ts
++++ b/frontend/src/main.ts
+@@ -1,5 +1,10 @@
+ import { createApp } from 'vue'
++import { createPinia } from 'pinia'
+ import './style.css'
+ import App from './App.vue'
++import router from './router'
+ 
+-createApp(App).mount('#app')
++const app = createApp(App)
++app.use(createPinia())
++app.use(router)
++app.mount('#app')
+diff --git a/frontend/src/style.css b/frontend/src/style.css
+index bbf23da..a0d96c0 100644
+--- a/frontend/src/style.css
++++ b/frontend/src/style.css
+@@ -1,298 +1,203 @@
+ @import "tailwindcss";
+ 
++/* ─── Design Tokens (ported from the prototype, cool blue theme) ─── */
+ :root {
+-  --text: #6b6375;
+-  --text-h: #08060d;
+-  --bg: #fff;
+-  --border: #e5e4e7;
+-  --code-bg: #f4f3ec;
+-  --accent: #aa3bff;
+-  --accent-bg: rgba(170, 59, 255, 0.1);
+-  --accent-border: rgba(170, 59, 255, 0.5);
+-  --social-bg: rgba(244, 243, 236, 0.5);
+-  --shadow:
+-    rgba(0, 0, 0, 0.1) 0 10px 15px -3px, rgba(0, 0, 0, 0.05) 0 4px 6px -2px;
+-
+-  --sans: system-ui, 'Segoe UI', Roboto, sans-serif;
+-  --heading: system-ui, 'Segoe UI', Roboto, sans-serif;
+-  --mono: ui-monospace, Consolas, monospace;
++  --bg-body: #f0f4f8;
++  --bg-sidebar: #ffffff;
++  --bg-main: #ffffff;
++  --bg-card: #ffffff;
++  --bg-hover: #e6f4ff;
++  --bg-active: #dbeafe;
++  --bg-input: #f8fafc;
++  --bg-code: #f1f5f9;
++
++  --text-primary: #0f172a;
++  --text-secondary: #475569;
++  --text-tertiary: #94a3b8;
++  --text-accent: #0369a1;
++
++  --border: #e2e8f0;
++  --border-light: #f1f5f9;
++  --shadow: 0 1px 3px rgba(15, 23, 42, 0.08), 0 1px 2px rgba(15, 23, 42, 0.06);
++  --shadow-lg: 0 10px 15px -3px rgba(15, 23, 42, 0.08), 0 4px 6px -2px rgba(15, 23, 42, 0.04);
++
++  --accent: #0284c7;
++  --accent-light: #e0f2fe;
++  --accent-hover: #0369a1;
++  --ring: rgba(2, 132, 199, 0.35);
++
++  --sidebar-width: 260px;
++  --header-height: 52px;
++  --radius: 8px;
++
++  --danger: #dc2626;
++  --danger-light: #fee2e2;
++
++  color-scheme: light;
++}
++
++[data-theme="dark"] {
++  --bg-body: #0b1120;
++  --bg-sidebar: #0f172a;
++  --bg-main: #111827;
++  --bg-card: #1e293b;
++  --bg-hover: #172554;
++  --bg-active: #1e3a8a;
++  --bg-input: #1e293b;
++  --bg-code: #1e293b;
++
++  --text-primary: #f1f5f9;
++  --text-secondary: #94a3b8;
++  --text-tertiary: #64748b;
++  --text-accent: #7dd3fc;
++
++  --border: #1e293b;
++  --border-light: #1f2937;
++  --shadow: 0 1px 3px rgba(0, 0, 0, 0.35), 0 1px 2px rgba(0, 0, 0, 0.25);
++  --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.45), 0 4px 6px -2px rgba(0, 0, 0, 0.3);
++
++  --accent: #38bdf8;
++  --accent-light: rgba(56, 189, 248, 0.12);
++  --accent-hover: #7dd3fc;
++  --ring: rgba(56, 189, 248, 0.35);
++
++  --danger: #f87171;
++  --danger-light: rgba(248, 113, 113, 0.12);
++
++  color-scheme: dark;
++}
++
++/* ─── Reset & Base ─── */
++*,
++*::before,
++*::after {
++  box-sizing: border-box;
++  margin: 0;
++  padding: 0;
++}
+ 
+-  font: 18px/145% var(--sans);
+-  letter-spacing: 0.18px;
+-  color-scheme: light dark;
+-  color: var(--text);
+-  background: var(--bg);
+-  font-synthesis: none;
+-  text-rendering: optimizeLegibility;
++html {
++  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
++    "Helvetica Neue", Arial, "PingFang SC", "Microsoft YaHei", sans-serif;
++  font-size: 14px;
++  line-height: 1.5;
+   -webkit-font-smoothing: antialiased;
+   -moz-osx-font-smoothing: grayscale;
++}
+ 
+-  @media (max-width: 1024px) {
+-    font-size: 16px;
+-  }
++body {
++  background: var(--bg-body);
++  color: var(--text-secondary);
++  height: 100vh;
++  overflow: hidden;
+ }
+ 
+-@media (prefers-color-scheme: dark) {
+-  :root {
+-    --text: #9ca3af;
+-    --text-h: #f3f4f6;
+-    --bg: #16171d;
+-    --border: #2e303a;
+-    --code-bg: #1f2028;
+-    --accent: #c084fc;
+-    --accent-bg: rgba(192, 132, 252, 0.15);
+-    --accent-border: rgba(192, 132, 252, 0.5);
+-    --social-bg: rgba(47, 48, 58, 0.5);
+-    --shadow:
+-      rgba(0, 0, 0, 0.4) 0 10px 15px -3px, rgba(0, 0, 0, 0.25) 0 4px 6px -2px;
+-  }
++#app {
++  height: 100vh;
++}
+ 
+-  #social .button-icon {
+-    filter: invert(1) brightness(2);
+-  }
++button {
++  font-family: inherit;
++  cursor: pointer;
++  border: none;
++  background: none;
++  color: inherit;
+ }
+ 
+-body {
+-  margin: 0;
++input,
++textarea {
++  font-family: inherit;
++  font-size: inherit;
++  color: inherit;
++  background: var(--bg-input);
++  border: 1px solid var(--border);
++  border-radius: var(--radius);
++  outline: none;
++  transition: border-color 0.2s, box-shadow 0.2s;
++}
++input:focus,
++textarea:focus {
++  border-color: var(--accent);
++  box-shadow: 0 0 0 3px var(--ring);
+ }
+ 
+-h1,
+-h2 {
+-  font-family: var(--heading);
+-  font-weight: 500;
+-  color: var(--text-h);
++a {
++  color: var(--text-accent);
++  text-decoration: none;
+ }
+ 
+-h1 {
+-  font-size: 56px;
+-  letter-spacing: -1.68px;
+-  margin: 32px 0;
+-  @media (max-width: 1024px) {
+-    font-size: 36px;
+-    margin: 20px 0;
+-  }
++/* ─── Scrollbars ─── */
++::-webkit-scrollbar {
++  width: 6px;
++  height: 6px;
+ }
+-h2 {
+-  font-size: 24px;
+-  line-height: 118%;
+-  letter-spacing: -0.24px;
+-  margin: 0 0 8px;
+-  @media (max-width: 1024px) {
+-    font-size: 20px;
+-  }
++::-webkit-scrollbar-thumb {
++  background: var(--border);
++  border-radius: 3px;
+ }
+-p {
+-  margin: 0;
++::-webkit-scrollbar-thumb:hover {
++  background: var(--text-tertiary);
+ }
+ 
+-code,
+-.counter {
+-  font-family: var(--mono);
++/* ─── Shared button utilities ─── */
++.btn {
+   display: inline-flex;
+-  border-radius: 4px;
+-  color: var(--text-h);
+-}
+-
+-code {
+-  font-size: 15px;
+-  line-height: 135%;
+-  padding: 4px 8px;
+-  background: var(--code-bg);
++  align-items: center;
++  justify-content: center;
++  gap: 6px;
++  padding: 7px 12px;
++  border-radius: var(--radius);
++  font-size: 13px;
++  font-weight: 500;
++  transition: all 0.2s;
++  white-space: nowrap;
+ }
+-
+-.counter {
+-  font-size: 16px;
+-  padding: 5px 10px;
+-  border-radius: 5px;
+-  color: var(--accent);
+-  background: var(--accent-bg);
+-  border: 2px solid transparent;
+-  transition: border-color 0.3s;
+-  margin-bottom: 24px;
+-
+-  &:hover {
+-    border-color: var(--accent-border);
+-  }
+-  &:focus-visible {
+-    outline: 2px solid var(--accent);
+-    outline-offset: 2px;
+-  }
++.btn-primary {
++  background: var(--accent);
++  color: #fff;
+ }
+-
+-.hero {
+-  position: relative;
+-
+-  .base,
+-  .framework,
+-  .vite {
+-    inset-inline: 0;
+-    margin: 0 auto;
+-  }
+-
+-  .base {
+-    width: 170px;
+-    position: relative;
+-    z-index: 0;
+-  }
+-
+-  .framework,
+-  .vite {
+-    position: absolute;
+-  }
+-
+-  .framework {
+-    z-index: 1;
+-    top: 34px;
+-    height: 28px;
+-    transform: perspective(2000px) rotateZ(300deg) rotateX(44deg) rotateY(39deg)
+-      scale(1.4);
+-  }
+-
+-  .vite {
+-    z-index: 0;
+-    top: 107px;
+-    height: 26px;
+-    width: auto;
+-    transform: perspective(2000px) rotateZ(300deg) rotateX(40deg) rotateY(39deg)
+-      scale(0.8);
+-  }
++.btn-primary:hover {
++  background: var(--accent-hover);
+ }
+-
+-#app {
+-  width: 1126px;
+-  max-width: 100%;
+-  margin: 0 auto;
+-  text-align: center;
+-  border-inline: 1px solid var(--border);
+-  min-height: 100svh;
+-  display: flex;
+-  flex-direction: column;
+-  box-sizing: border-box;
++.btn-ghost {
++  background: transparent;
++  color: var(--text-secondary);
++  border: 1px solid var(--border);
+ }
+-
+-#center {
+-  display: flex;
+-  flex-direction: column;
+-  gap: 25px;
+-  place-content: center;
+-  place-items: center;
+-  flex-grow: 1;
+-
+-  @media (max-width: 1024px) {
+-    padding: 32px 20px 24px;
+-    gap: 18px;
+-  }
++.btn-ghost:hover {
++  background: var(--bg-hover);
++  color: var(--text-primary);
+ }
+-
+-#next-steps {
+-  display: flex;
+-  border-top: 1px solid var(--border);
+-  text-align: left;
+-
+-  & > div {
+-    flex: 1 1 0;
+-    padding: 32px;
+-    @media (max-width: 1024px) {
+-      padding: 24px 20px;
+-    }
+-  }
+-
+-  .icon {
+-    margin-bottom: 16px;
+-    width: 22px;
+-    height: 22px;
+-  }
+-
+-  @media (max-width: 1024px) {
+-    flex-direction: column;
+-    text-align: center;
+-  }
++.btn-danger {
++  background: var(--danger);
++  color: #fff;
+ }
+-
+-#docs {
+-  border-right: 1px solid var(--border);
+-
+-  @media (max-width: 1024px) {
+-    border-right: none;
+-    border-bottom: 1px solid var(--border);
+-  }
++.btn-danger:hover {
++  opacity: 0.9;
+ }
+-
+-#next-steps ul {
+-  list-style: none;
++.btn-icon {
++  width: 32px;
++  height: 32px;
+   padding: 0;
+-  display: flex;
+-  gap: 8px;
+-  margin: 32px 0 0;
+-
+-  .logo {
+-    height: 18px;
+-  }
+-
+-  a {
+-    color: var(--text-h);
+-    font-size: 16px;
+-    border-radius: 6px;
+-    background: var(--social-bg);
+-    display: flex;
+-    padding: 6px 12px;
+-    align-items: center;
+-    gap: 8px;
+-    text-decoration: none;
+-    transition: box-shadow 0.3s;
+-
+-    &:hover {
+-      box-shadow: var(--shadow);
+-    }
+-    .button-icon {
+-      height: 18px;
+-      width: 18px;
+-    }
+-  }
+-
+-  @media (max-width: 1024px) {
+-    margin-top: 20px;
+-    flex-wrap: wrap;
+-    justify-content: center;
+-
+-    li {
+-      flex: 1 1 calc(50% - 8px);
+-    }
+-
+-    a {
+-      width: 100%;
+-      justify-content: center;
+-      box-sizing: border-box;
+-    }
+-  }
++  border-radius: var(--radius);
++  color: var(--text-tertiary);
++  display: inline-flex;
++  align-items: center;
++  justify-content: center;
+ }
+-
+-#spacer {
+-  height: 88px;
+-  border-top: 1px solid var(--border);
+-  @media (max-width: 1024px) {
+-    height: 48px;
+-  }
++.btn-icon:hover {
++  background: var(--bg-hover);
++  color: var(--text-primary);
+ }
+ 
+-.ticks {
+-  position: relative;
+-  width: 100%;
+-
+-  &::before,
+-  &::after {
+-    content: '';
+-    position: absolute;
+-    top: -4.5px;
+-    border: 5px solid transparent;
+-  }
+-
+-  &::before {
+-    left: 0;
+-    border-left-color: var(--border);
+-  }
+-  &::after {
+-    right: 0;
+-    border-right-color: var(--border);
+-  }
++.sr-only {
++  position: absolute;
++  width: 1px;
++  height: 1px;
++  padding: 0;
++  margin: -1px;
++  overflow: hidden;
++  clip: rect(0, 0, 0, 0);
++  white-space: nowrap;
++  border-width: 0;
+ }
+diff --git a/frontend/tsconfig.app.json b/frontend/tsconfig.app.json
+index 5c750c5..43989d9 100644
+--- a/frontend/tsconfig.app.json
++++ b/frontend/tsconfig.app.json
+@@ -4,6 +4,11 @@
+     "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.app.tsbuildinfo",
+     "types": ["vite/client"],
+ 
++    /* Path alias — must mirror vite.config.ts resolve.alias */
++    "paths": {
++      "@/*": ["./src/*"]
++    },
++
+     /* Linting */
+     "noUnusedLocals": true,
+     "noUnusedParameters": true,
+diff --git a/frontend/vite.config.ts b/frontend/vite.config.ts
+index 4815a12..592128b 100644
+--- a/frontend/vite.config.ts
++++ b/frontend/vite.config.ts
+@@ -1,8 +1,24 @@
+ import { defineConfig } from 'vite'
+ import vue from '@vitejs/plugin-vue'
+ import tailwindcss from '@tailwindcss/vite'
++import { fileURLToPath, URL } from 'node:url'
+ 
+ // https://vite.dev/config/
+ export default defineConfig({
+   plugins: [vue(), tailwindcss()],
++  resolve: {
++    alias: {
++      '@': fileURLToPath(new URL('./src', import.meta.url)),
++    },
++  },
++  server: {
++    port: 6580,
++    proxy: {
++      // Forward API calls to the FastAPI backend during dev to avoid CORS.
++      '/api': {
++        target: 'http://localhost:6581',
++        changeOrigin: true,
++      },
++    },
++  },
+ })

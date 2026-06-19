@@ -1,0 +1,1242 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>智能笔记 (AI Note) — 原型</title>
+  <style>
+    /* ─── Design Tokens ─── */
+    :root {
+      /* 白天模式 —— 冷色调 */
+      --bg-body: #f0f4f8;
+      --bg-sidebar: #ffffff;
+      --bg-main: #ffffff;
+      --bg-card: #ffffff;
+      --bg-hover: #e6f4ff;
+      --bg-active: #dbeafe;
+      --bg-input: #f8fafc;
+      --bg-code: #f1f5f9;
+
+      --text-primary: #0f172a;
+      --text-secondary: #475569;
+      --text-tertiary: #94a3b8;
+      --text-accent: #0369a1;
+
+      --border: #e2e8f0;
+      --border-light: #f1f5f9;
+      --shadow: 0 1px 3px rgba(15, 23, 42, 0.08), 0 1px 2px rgba(15, 23, 42, 0.06);
+      --shadow-lg: 0 10px 15px -3px rgba(15, 23, 42, 0.08), 0 4px 6px -2px rgba(15, 23, 42, 0.04);
+
+      --accent: #0284c7;
+      --accent-light: #e0f2fe;
+      --accent-hover: #0369a1;
+      --ring: rgba(2, 132, 199, 0.35);
+
+      --sidebar-width: 260px;
+      --header-height: 52px;
+      --radius: 8px;
+
+      color-scheme: light;
+    }
+
+    /* 暗黑模式 —— 冷色调 */
+    [data-theme="dark"] {
+      --bg-body: #0b1120;
+      --bg-sidebar: #0f172a;
+      --bg-main: #111827;
+      --bg-card: #1e293b;
+      --bg-hover: #172554;
+      --bg-active: #1e3a8a;
+      --bg-input: #1e293b;
+      --bg-code: #1e293b;
+
+      --text-primary: #f1f5f9;
+      --text-secondary: #94a3b8;
+      --text-tertiary: #64748b;
+      --text-accent: #7dd3fc;
+
+      --border: #1e293b;
+      --border-light: #1f2937;
+      --shadow: 0 1px 3px rgba(0, 0, 0, 0.35), 0 1px 2px rgba(0, 0, 0, 0.25);
+      --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.45), 0 4px 6px -2px rgba(0, 0, 0, 0.3);
+
+      --accent: #38bdf8;
+      --accent-light: rgba(56, 189, 248, 0.12);
+      --accent-hover: #7dd3fc;
+      --ring: rgba(56, 189, 248, 0.35);
+
+      color-scheme: dark;
+    }
+
+    /* ─── Reset & Base ─── */
+    *, *::before, *::after {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    html {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      font-size: 14px;
+      line-height: 1.5;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+    }
+
+    body {
+      background: var(--bg-body);
+      color: var(--text-secondary);
+      height: 100vh;
+      overflow: hidden;
+    }
+
+    button {
+      font-family: inherit;
+      cursor: pointer;
+      border: none;
+      background: none;
+      color: inherit;
+    }
+
+    input, textarea {
+      font-family: inherit;
+      font-size: inherit;
+      color: inherit;
+      background: var(--bg-input);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      outline: none;
+      transition: border-color 0.2s, box-shadow 0.2s;
+    }
+    input:focus, textarea:focus {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px var(--ring);
+    }
+
+    /* ─── App Shell ─── */
+    .app {
+      display: flex;
+      height: 100vh;
+    }
+
+    /* ─── Sidebar ─── */
+    .sidebar {
+      width: var(--sidebar-width);
+      background: var(--bg-sidebar);
+      border-right: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      flex-shrink: 0;
+      transition: background 0.3s, border-color 0.3s;
+    }
+
+    .sidebar-header {
+      height: var(--header-height);
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 0 16px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .logo-icon {
+      width: 28px;
+      height: 28px;
+      color: var(--accent);
+      flex-shrink: 0;
+    }
+
+    .logo-text {
+      font-size: 16px;
+      font-weight: 600;
+      color: var(--text-primary);
+      letter-spacing: -0.3px;
+    }
+
+    .sidebar-user {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 12px 16px;
+      border-bottom: 1px solid var(--border-light);
+    }
+
+    .avatar {
+      width: 32px;
+      height: 32px;
+      border-radius: 50%;
+      background: linear-gradient(135deg, var(--accent), #6366f1);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #fff;
+      font-size: 13px;
+      font-weight: 600;
+      flex-shrink: 0;
+    }
+
+    .user-info {
+      flex: 1;
+      min-width: 0;
+    }
+    .user-name {
+      font-weight: 500;
+      color: var(--text-primary);
+      font-size: 13px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .user-role {
+      font-size: 12px;
+      color: var(--text-tertiary);
+    }
+
+    .sidebar-actions {
+      display: flex;
+      gap: 8px;
+      padding: 12px 16px;
+    }
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      padding: 7px 12px;
+      border-radius: var(--radius);
+      font-size: 13px;
+      font-weight: 500;
+      transition: all 0.2s;
+      white-space: nowrap;
+    }
+    .btn-primary {
+      background: var(--accent);
+      color: #fff;
+    }
+    .btn-primary:hover {
+      background: var(--accent-hover);
+    }
+    .btn-ghost {
+      background: transparent;
+      color: var(--text-secondary);
+      border: 1px solid var(--border);
+    }
+    .btn-ghost:hover {
+      background: var(--bg-hover);
+      color: var(--text-primary);
+    }
+    .btn-icon {
+      width: 32px;
+      height: 32px;
+      padding: 0;
+      border-radius: var(--radius);
+      color: var(--text-tertiary);
+    }
+    .btn-icon:hover {
+      background: var(--bg-hover);
+      color: var(--text-primary);
+    }
+
+    .sidebar-content {
+      flex: 1;
+      overflow-y: auto;
+      padding: 8px 10px;
+    }
+    .sidebar-content::-webkit-scrollbar { width: 5px; }
+    .sidebar-content::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+    .tree-section-title {
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: var(--text-tertiary);
+      padding: 12px 6px 6px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    /* ─── Tree ─── */
+    .tree-node {
+      user-select: none;
+    }
+    .tree-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 8px;
+      border-radius: 6px;
+      cursor: pointer;
+      transition: background 0.15s, color 0.15s;
+      color: var(--text-secondary);
+    }
+    .tree-row:hover {
+      background: var(--bg-hover);
+      color: var(--text-primary);
+    }
+    .tree-row.active {
+      background: var(--bg-active);
+      color: var(--text-accent);
+    }
+    .tree-row .icon {
+      width: 16px;
+      height: 16px;
+      flex-shrink: 0;
+      color: currentColor;
+      opacity: 0.75;
+    }
+    .tree-toggle {
+      width: 18px;
+      height: 18px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 4px;
+      flex-shrink: 0;
+      transition: transform 0.2s;
+      color: var(--text-tertiary);
+    }
+    .tree-toggle:hover {
+      background: var(--bg-active);
+    }
+    .tree-toggle.collapsed {
+      transform: rotate(-90deg);
+    }
+    .tree-toggle svg {
+      width: 12px;
+      height: 12px;
+    }
+    .tree-children {
+      padding-left: 18px;
+      overflow: hidden;
+      transition: max-height 0.25s ease, opacity 0.2s ease;
+    }
+    .tree-children.collapsed {
+      max-height: 0;
+      opacity: 0;
+    }
+    .tree-label {
+      flex: 1;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      font-size: 13px;
+    }
+    .tree-count {
+      font-size: 11px;
+      color: var(--text-tertiary);
+      background: var(--bg-body);
+      padding: 1px 6px;
+      border-radius: 10px;
+      flex-shrink: 0;
+    }
+    .tree-row.active .tree-count {
+      background: var(--accent-light);
+      color: var(--text-accent);
+    }
+
+    /* ─── Main ─── */
+    .main {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
+    }
+
+    .topbar {
+      height: var(--header-height);
+      background: var(--bg-main);
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 20px;
+      gap: 16px;
+      flex-shrink: 0;
+    }
+
+    .search-box {
+      position: relative;
+      flex: 1;
+      max-width: 420px;
+    }
+    .search-box input {
+      width: 100%;
+      height: 34px;
+      padding: 0 12px 0 32px;
+      font-size: 13px;
+      background: var(--bg-input);
+      border: 1px solid var(--border);
+    }
+    .search-box .icon {
+      position: absolute;
+      left: 10px;
+      top: 50%;
+      transform: translateY(-50%);
+      width: 14px;
+      height: 14px;
+      color: var(--text-tertiary);
+      pointer-events: none;
+    }
+
+    .topbar-actions {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    /* ─── Content Split ─── */
+    .workspace {
+      flex: 1;
+      display: flex;
+      overflow: hidden;
+    }
+
+    /* ─── Note List ─── */
+    .note-list {
+      width: 320px;
+      background: var(--bg-main);
+      border-right: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      flex-shrink: 0;
+    }
+
+    .note-list-header {
+      padding: 16px 16px 8px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .note-list-title {
+      font-size: 15px;
+      font-weight: 600;
+      color: var(--text-primary);
+    }
+    .note-list-count {
+      font-size: 12px;
+      color: var(--text-tertiary);
+    }
+
+    .note-items {
+      flex: 1;
+      overflow-y: auto;
+      padding: 0 10px 10px;
+    }
+    .note-items::-webkit-scrollbar { width: 5px; }
+    .note-items::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+    .note-card {
+      padding: 12px;
+      border-radius: var(--radius);
+      border: 1px solid transparent;
+      cursor: pointer;
+      transition: all 0.15s;
+      margin-bottom: 6px;
+    }
+    .note-card:hover {
+      background: var(--bg-hover);
+      border-color: var(--border);
+    }
+    .note-card.active {
+      background: var(--bg-card);
+      border-color: var(--accent);
+      box-shadow: var(--shadow);
+    }
+    .note-card-title {
+      font-size: 13px;
+      font-weight: 500;
+      color: var(--text-primary);
+      margin-bottom: 4px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .note-card.active .note-card-title {
+      color: var(--text-accent);
+    }
+    .note-card-summary {
+      font-size: 12px;
+      color: var(--text-tertiary);
+      line-height: 1.4;
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+      margin-bottom: 8px;
+    }
+    .note-card-meta {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 11px;
+      color: var(--text-tertiary);
+    }
+    .note-card-tag {
+      background: var(--bg-hover);
+      color: var(--text-accent);
+      padding: 1px 6px;
+      border-radius: 4px;
+      font-size: 11px;
+      font-weight: 500;
+    }
+    .note-card-pinned .icon {
+      width: 12px;
+      height: 12px;
+      color: var(--accent);
+    }
+
+    /* ─── Editor ─── */
+    .editor {
+      flex: 1;
+      background: var(--bg-main);
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
+    }
+
+    .editor-toolbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 10px 20px;
+      border-bottom: 1px solid var(--border);
+      gap: 12px;
+    }
+    .toolbar-group {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+    .toolbar-btn {
+      width: 30px;
+      height: 30px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 6px;
+      color: var(--text-tertiary);
+      transition: all 0.15s;
+    }
+    .toolbar-btn:hover {
+      background: var(--bg-hover);
+      color: var(--text-primary);
+    }
+    .toolbar-btn svg {
+      width: 16px;
+      height: 16px;
+    }
+
+    .editor-body {
+      flex: 1;
+      overflow-y: auto;
+      padding: 20px 24px;
+    }
+    .editor-body::-webkit-scrollbar { width: 6px; }
+    .editor-body::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+    .editor-title-input {
+      width: 100%;
+      font-size: 24px;
+      font-weight: 700;
+      color: var(--text-primary);
+      background: transparent;
+      border: none;
+      border-bottom: 1px solid transparent;
+      border-radius: 0;
+      padding: 0 0 8px;
+      margin-bottom: 12px;
+      letter-spacing: -0.5px;
+    }
+    .editor-title-input:focus {
+      box-shadow: none;
+      border-bottom-color: var(--accent);
+    }
+    .editor-title-input::placeholder {
+      color: var(--text-tertiary);
+    }
+
+    .editor-meta-bar {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      margin-bottom: 16px;
+      font-size: 12px;
+      color: var(--text-tertiary);
+    }
+    .editor-meta-item {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+    .editor-meta-item svg {
+      width: 13px;
+      height: 13px;
+    }
+
+    .editor-textarea {
+      width: 100%;
+      min-height: 400px;
+      resize: vertical;
+      padding: 16px;
+      font-size: 14px;
+      line-height: 1.7;
+      background: var(--bg-input);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      color: var(--text-secondary);
+    }
+    .editor-textarea::placeholder {
+      color: var(--text-tertiary);
+    }
+
+    .ai-bar {
+      margin-bottom: 16px;
+      padding: 12px 16px;
+      background: var(--accent-light);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .ai-bar .icon {
+      width: 18px;
+      height: 18px;
+      color: var(--accent);
+      flex-shrink: 0;
+    }
+    .ai-bar-text {
+      flex: 1;
+      font-size: 13px;
+      color: var(--text-accent);
+    }
+    .ai-bar-btn {
+      padding: 5px 12px;
+      border-radius: 6px;
+      font-size: 12px;
+      font-weight: 500;
+      background: var(--accent);
+      color: #fff;
+      transition: background 0.2s;
+    }
+    .ai-bar-btn:hover {
+      background: var(--accent-hover);
+    }
+
+    /* ─── Empty State ─── */
+    .empty-state {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      color: var(--text-tertiary);
+      gap: 12px;
+    }
+    .empty-state svg {
+      width: 48px;
+      height: 48px;
+      opacity: 0.4;
+    }
+    .empty-state p {
+      font-size: 14px;
+    }
+
+    /* ─── Sidebar Footer ─── */
+    .sidebar-footer {
+      padding: 12px 14px;
+      border-top: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .sidebar-footer .avatar {
+      width: 32px;
+      height: 32px;
+      font-size: 13px;
+    }
+    .sidebar-footer .user-info {
+      flex: 1;
+      min-width: 0;
+    }
+    .sidebar-footer-actions {
+      display: flex;
+      gap: 2px;
+      flex-shrink: 0;
+    }
+    .sidebar-footer-actions .btn-icon {
+      width: 30px;
+      height: 30px;
+      color: var(--text-tertiary);
+    }
+    .sidebar-footer-actions .btn-icon:hover {
+      background: var(--bg-hover);
+      color: var(--text-primary);
+    }
+
+    /* ─── AI Chat ─── */
+    .chat-view {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      background: var(--bg-main);
+      min-width: 0;
+    }
+    .chat-header {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 12px 20px;
+      border-bottom: 1px solid var(--border);
+    }
+    .chat-header-icon {
+      width: 36px;
+      height: 36px;
+      border-radius: 50%;
+      background: var(--accent-light);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--accent);
+      flex-shrink: 0;
+    }
+    .chat-header-icon svg {
+      width: 20px;
+      height: 20px;
+    }
+    .chat-header-title {
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--text-primary);
+    }
+    .chat-header-status {
+      font-size: 12px;
+      color: var(--text-tertiary);
+    }
+    .chat-messages {
+      flex: 1;
+      overflow-y: auto;
+      padding: 20px 24px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+    .chat-message {
+      display: flex;
+      gap: 12px;
+      max-width: 85%;
+    }
+    .chat-message.user {
+      align-self: flex-end;
+      flex-direction: row-reverse;
+    }
+    .chat-message.ai {
+      align-self: flex-start;
+    }
+    .chat-avatar {
+      width: 32px;
+      height: 32px;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+      font-size: 12px;
+      font-weight: 600;
+    }
+    .chat-message.user .chat-avatar {
+      background: linear-gradient(135deg, var(--accent), #6366f1);
+      color: #fff;
+    }
+    .chat-message.ai .chat-avatar {
+      background: var(--accent-light);
+      color: var(--accent);
+    }
+    .chat-bubble {
+      padding: 12px 16px;
+      border-radius: 14px;
+      font-size: 14px;
+      line-height: 1.65;
+      color: var(--text-secondary);
+    }
+    .chat-message.user .chat-bubble {
+      background: var(--accent);
+      color: #fff;
+      border-bottom-right-radius: 4px;
+    }
+    .chat-message.ai .chat-bubble {
+      background: var(--bg-input);
+      border: 1px solid var(--border);
+      border-bottom-left-radius: 4px;
+    }
+    .chat-message.ai .chat-bubble strong {
+      color: var(--text-primary);
+    }
+    .chat-message.ai .chat-bubble code {
+      font-family: ui-monospace, Consolas, monospace;
+      background: var(--bg-code);
+      padding: 2px 5px;
+      border-radius: 4px;
+      font-size: 12px;
+      color: var(--text-accent);
+    }
+    .chat-input-area {
+      display: flex;
+      gap: 10px;
+      align-items: flex-end;
+      padding: 14px 20px 18px;
+      border-top: 1px solid var(--border);
+      background: var(--bg-main);
+    }
+    .chat-textarea {
+      flex: 1;
+      min-height: 44px;
+      max-height: 140px;
+      resize: none;
+      padding: 10px 14px;
+      font-size: 14px;
+      line-height: 1.5;
+    }
+    .chat-send-btn {
+      width: 40px;
+      height: 40px;
+      border-radius: 10px;
+      background: var(--accent);
+      color: #fff;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: background 0.2s;
+      flex-shrink: 0;
+    }
+    .chat-send-btn:hover {
+      background: var(--accent-hover);
+    }
+    .chat-send-btn svg {
+      width: 18px;
+      height: 18px;
+    }
+
+    /* ─── Tooltip / Helpers ─── */
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border-width: 0;
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <!-- ═══════ Sidebar ═══════ -->
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <!-- Logo: Sparkles / Note -->
+        <svg class="logo-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M15 14c.2-1 .7-1.7 1.5-2.5 1-.9 1.5-2.2 1.5-3.5A6 6 0 0 0 6 8c0 1 .2 2.2 1.5 3.5.7.7 1.3 1.5 1.5 2.5"/>
+          <path d="M9 18h6"/>
+          <path d="M10 22h4"/>
+        </svg>
+        <span class="logo-text">智能笔记</span>
+      </div>
+
+      <div class="sidebar-actions">
+        <button class="btn btn-primary" onclick="alert('原型：新建笔记')">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="12" y1="5" x2="12" y2="19"/>
+            <line x1="5" y1="12" x2="19" y2="12"/>
+          </svg>
+          新建笔记
+        </button>
+        <button class="btn btn-ghost" onclick="alert('原型：新建分类')">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+            <line x1="12" y1="11" x2="12" y2="17"/>
+            <line x1="9" y1="14" x2="15" y2="14"/>
+          </svg>
+          分类
+        </button>
+      </div>
+
+      <div class="sidebar-content">
+        <div class="tree-section-title">
+          <span>笔记分类</span>
+        </div>
+        <div id="category-tree"></div>
+      </div>
+
+      <div class="sidebar-footer">
+        <div class="avatar">张</div>
+        <div class="user-info">
+          <div class="user-name">张三</div>
+          <div class="user-role">user@example.com</div>
+        </div>
+        <div class="sidebar-footer-actions">
+          <button class="btn-icon" id="theme-toggle" title="切换主题">
+            <svg id="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="5"/>
+              <line x1="12" y1="1" x2="12" y2="3"/>
+              <line x1="12" y1="21" x2="12" y2="23"/>
+              <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/>
+              <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/>
+              <line x1="1" y1="12" x2="3" y2="12"/>
+              <line x1="21" y1="12" x2="23" y2="12"/>
+              <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/>
+              <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
+            </svg>
+            <svg id="icon-moon" style="display:none" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+            </svg>
+          </button>
+          <button class="btn-icon" title="设置" onclick="alert('原型：设置')">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="3"/>
+              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.62 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 8.58 4.62a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1.51 1H15a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+            </svg>
+          </button>
+        </div>
+      </div>
+    </aside>
+
+    <!-- ═══════ Main ═══════ -->
+    <main class="main">
+      <header class="topbar">
+        <div class="search-box">
+          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="11" cy="11" r="8"/>
+            <line x1="21" y1="21" x2="16.65" y2="16.65"/>
+          </svg>
+          <input type="text" placeholder="搜索笔记标题、内容、标签…" />
+        </div>
+
+        <div class="topbar-actions">
+          <!-- 用户、主题、设置已移至侧边栏底部 -->
+        </div>
+      </header>
+
+      <div class="workspace">
+        <!-- Note List -->
+        <div class="note-list" id="note-list-panel">
+          <div class="note-list-header">
+            <span class="note-list-title">全部笔记</span>
+            <span class="note-list-count">3 篇</span>
+          </div>
+          <div class="note-items" id="note-items"></div>
+        </div>
+
+        <!-- Editor -->
+        <div class="editor" id="editor"></div>
+
+        <!-- AI Chat -->
+        <div class="chat-view" id="chat-view" style="display:none">
+          <div class="chat-header">
+            <div class="chat-header-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M12 2a2 2 0 0 1 2 2c0 .74-.4 1.387-1 1.732V7h1a7 7 0 0 1 7 7h1a2 2 0 0 1 2 2c0 .74-.4 1.387-1 1.732V20a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2v-1.268A2 2 0 0 1 1 16a2 2 0 0 1 2-2h1a7 7 0 0 1 7-7h1V5.732A2 2 0 0 1 9 4a2 2 0 0 1 2-2z"/>
+                <path d="M9 13h6"/><path d="M9 17h3"/>
+              </svg>
+            </div>
+            <div class="chat-header-info">
+              <div class="chat-header-title">DeepSeek AI 助手</div>
+              <div class="chat-header-status">模型: V4 Pro · 上下文: 8K</div>
+            </div>
+          </div>
+          <div class="chat-messages" id="chat-messages"></div>
+          <div class="chat-input-area">
+            <textarea class="chat-textarea" placeholder="向 AI 提问…"></textarea>
+            <button class="chat-send-btn" onclick="alert('原型：发送消息')">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                <line x1="22" y1="2" x2="11" y2="13"/>
+                <polygon points="22 2 15 22 11 13 2 9 22 2"/>
+              </svg>
+            </button>
+          </div>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <script>
+    /* ─── Data ─── */
+    const categories = [
+      { id: 1, name: '工作笔记', icon: 'briefcase', count: 12, children: [
+        { id: 11, name: '会议纪要', icon: 'file-text', count: 5 },
+        { id: 12, name: '项目计划', icon: 'calendar', count: 4, children: [
+          { id: 121, name: '前端重构', icon: 'code', count: 2 },
+          { id: 122, name: '后端优化', icon: 'server', count: 2 },
+        ]},
+        { id: 13, name: '周报总结', icon: 'trending-up', count: 3 },
+      ]},
+      { id: 2, name: '学习资料', icon: 'book-open', count: 8, children: [
+        { id: 21, name: 'Python', icon: 'terminal', count: 3 },
+        { id: 22, name: 'Vue.js', icon: 'layout', count: 3 },
+        { id: 23, name: '系统设计', icon: 'cpu', count: 2 },
+      ]},
+      { id: 3, name: '生活随笔', icon: 'coffee', count: 5, children: [
+        { id: 31, name: '读书笔记', icon: 'book', count: 3 },
+        { id: 32, name: '旅行日志', icon: 'map-pin', count: 2 },
+      ]},
+      { id: 4, name: 'AI 对话', icon: 'message-square', count: 18 },
+    ];
+
+    const notes = [
+      {
+        id: 101,
+        title: 'FastAPI 项目结构最佳实践',
+        summary: '整理了我们在智能笔记项目中采用的分层架构：api / service / model / utils，以及为什么不用 Alembic 而是原始 SQL 迁移。',
+        date: '2026-06-17',
+        tags: ['Python', 'FastAPI'],
+        pinned: true,
+        content: `# FastAPI 项目结构最佳实践\n\n## 分层架构\n\n我们的后端采用四层结构：\n\n- **api** — 路由定义与请求校验\n- **service** — 业务逻辑\n- **model** — SQLAlchemy ORM\n- **utils** — 通用工具（JWT、日志、Snowflake ID）\n\n## 为什么不用 Alembic？\n\n项目初期变更频繁，Alembic 的自动迁移脚本经常需要人工修正。改用原始 SQL 后，迁移意图更清晰，review 也更容易。`
+      },
+      {
+        id: 102,
+        title: 'PostgreSQL 中文全文搜索方案',
+        summary: '使用 jieba 对标题和内容进行分词，存入 tsvector 字段，查询时用 plainto_tsquery。无需安装 zhparser 扩展。',
+        date: '2026-06-15',
+        tags: ['PostgreSQL', 'Search'],
+        pinned: false,
+        content: `# PostgreSQL 中文全文搜索方案\n\n## 核心思路\n\nPostgreSQL 自带的 parser 对中文分词效果很差。我们的方案：\n\n1. 用 **jieba** 在应用层分词\n2. 将分词结果拼接成空格分隔的字符串\n3. 存入 \`to_tsvector('simple', ...)\`\n4. 查询时同样用 jieba 分词后构建 \`plainto_tsquery\`\n\n## 索引\n\n\`\`\`sql\nCREATE INDEX idx_notes_search ON notes USING GIN (search_vector);\n\`\`\``
+      },
+      {
+        id: 103,
+        title: 'Vue 3 + Tailwind v4 集成记录',
+        summary: '前端初始化过程中遇到的一些问题：Tailwind v4 的新配置格式、与 Naive UI 的样式冲突处理、以及 Pinia 状态管理的目录设计。',
+        date: '2026-06-14',
+        tags: ['Vue', 'Frontend'],
+        pinned: false,
+        content: `# Vue 3 + Tailwind v4 集成记录\n\n## Tailwind v4 变化\n\nv4 改为基于 CSS 的配置，不再需要 \`tailwind.config.js\`。直接在 CSS 里写 \`@import \\"tailwindcss\\";\` 即可。\n\n## Naive UI 冲突\n\nNaive 组件的样式权重较高，必要时用 \`:deep()\` 或提高选择器优先级覆盖。`
+      },
+    ];
+
+    const chatMessages = [
+      { role: 'user', content: '帮我总结一下这篇关于 FastAPI 项目结构的文章要点。' },
+      { role: 'ai', content: '这篇文章的核心要点如下：<br><br>1. <strong>分层架构</strong>：api / service / model / utils 四层分离，职责清晰。<br>2. <strong>不用 Alembic</strong>：项目初期变更频繁，原始 SQL 迁移意图更清晰，review 更容易。<br>3. <strong>Snowflake ID</strong>：应用层生成 64 位 ID，避免数据库自增锁。<br>4. <strong>应用层时间戳</strong>：使用 <code>datetime.now()</code> 而非数据库 <code>now()</code>，便于测试和跨时区一致性。' },
+      { role: 'user', content: 'PostgreSQL 中文搜索为什么不用 zhparser？' },
+      { role: 'ai', content: '项目选择 <strong>jieba + tsvector(\'simple\')</strong> 而非 zhparser 的原因：<br><br>• <strong>零扩展依赖</strong>：无需在 PostgreSQL 服务端安装额外扩展，降低部署复杂度。<br>• <strong>灵活可控</strong>：应用层分词可以随时调整词典和策略，无需 DBA 介入。<br>• <strong>兼容性</strong>：' },
+    ];
+
+    let selectedNoteId = 101;
+    let selectedCategoryId = null;
+    let dark = false;
+
+    /* ─── Icons (inline SVG strings) ─── */
+    const icons = {
+      'briefcase': '<path d="M20 7H4a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2z"/><path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"/>',
+      'file-text': '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/>',
+      'calendar': '<rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/>',
+      'code': '<polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/>',
+      'server': '<rect x="2" y="2" width="20" height="8" rx="2" ry="2"/><rect x="2" y="14" width="20" height="8" rx="2" ry="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/>',
+      'trending-up': '<polyline points="23 6 13.5 15.5 8.5 10.5 1 18"/><polyline points="17 6 23 6 23 12"/>',
+      'book-open': '<path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/>',
+      'terminal': '<polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/>',
+      'layout': '<rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="9" y1="21" x2="9" y2="9"/>',
+      'cpu': '<rect x="4" y="4" width="16" height="16" rx="2" ry="2"/><rect x="9" y="9" width="6" height="6"/><line x1="9" y1="1" x2="9" y2="4"/><line x1="15" y1="1" x2="15" y2="4"/><line x1="9" y1="20" x2="9" y2="23"/><line x1="15" y1="20" x2="15" y2="23"/><line x1="20" y1="9" x2="23" y2="9"/><line x1="20" y1="14" x2="23" y2="14"/><line x1="1" y1="9" x2="4" y2="9"/><line x1="1" y1="14" x2="4" y2="14"/>',
+      'coffee': '<path d="M18 8h1a4 4 0 0 1 0 8h-1"/><path d="M2 8h16v9a4 4 0 0 1-4 4H6a4 4 0 0 1-4-4V8z"/><line x1="6" y1="1" x2="6" y2="4"/><line x1="10" y1="1" x2="10" y2="4"/><line x1="14" y1="1" x2="14" y2="4"/>',
+      'book': '<path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>',
+      'map-pin': '<path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/>',
+      'message-square': '<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>',
+      'folder': '<path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>',
+      'chevron-down': '<polyline points="6 9 12 15 18 9"/>',
+      'pin': '<line x1="12" y1="17" x2="12" y2="22"/><path d="M5 17h14v-1.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V6h1a2 2 0 0 0 0-4H8a2 2 0 0 0 0 4h1v4.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24z"/>',
+    };
+
+    function icon(name) {
+      const svg = icons[name] || icons['folder'];
+      return `<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${svg}</svg>`;
+    }
+
+    /* ─── Tree Rendering ─── */
+    function renderTree(nodes, container) {
+      nodes.forEach(node => {
+        const el = document.createElement('div');
+        el.className = 'tree-node';
+
+        const hasChildren = node.children && node.children.length;
+        const toggleClass = hasChildren ? '' : 'collapsed';
+        const toggleDisplay = hasChildren ? '' : 'style="visibility:hidden"';
+
+        const row = document.createElement('div');
+        row.className = 'tree-row' + (selectedCategoryId === node.id ? ' active' : '');
+        row.innerHTML = `
+          <span class="tree-toggle ${toggleClass}" ${toggleDisplay} onclick="toggleNode(this, event)">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+          </span>
+          ${icon(node.icon || 'folder')}
+          <span class="tree-label">${node.name}</span>
+          <span class="tree-count">${node.count}</span>
+        `;
+        row.onclick = (e) => {
+          if (e.target.closest('.tree-toggle')) return;
+          selectCategory(node.id, row);
+        };
+
+        el.appendChild(row);
+
+        if (hasChildren) {
+          const children = document.createElement('div');
+          children.className = 'tree-children';
+          renderTree(node.children, children);
+          el.appendChild(children);
+        }
+
+        container.appendChild(el);
+      });
+    }
+
+    function toggleNode(btn, e) {
+      e.stopPropagation();
+      const children = btn.closest('.tree-node').querySelector('.tree-children');
+      if (!children) return;
+      btn.classList.toggle('collapsed');
+      children.classList.toggle('collapsed');
+    }
+
+    function selectCategory(id, rowEl) {
+      selectedCategoryId = id;
+      document.querySelectorAll('.tree-row').forEach(r => r.classList.remove('active'));
+      if (rowEl) rowEl.classList.add('active');
+
+      // 切换视图：AI 对话分类显示聊天界面
+      const isAiChat = id === 4;
+      document.getElementById('note-list-panel').style.display = isAiChat ? 'none' : 'flex';
+      document.getElementById('editor').style.display = isAiChat ? 'none' : 'flex';
+      const chatView = document.getElementById('chat-view');
+      if (isAiChat) {
+        chatView.style.display = 'flex';
+        renderChat();
+      } else {
+        chatView.style.display = 'none';
+      }
+    }
+
+    /* ─── Note List Rendering ─── */
+    function renderNoteList() {
+      const container = document.getElementById('note-items');
+      container.innerHTML = notes.map(note => `
+        <div class="note-card ${note.id === selectedNoteId ? 'active' : ''}" onclick="selectNote(${note.id})">
+          <div class="note-card-title">
+            ${note.pinned ? '<span class="note-card-pinned">' + icon('pin') + '</span> ' : ''}${note.title}
+          </div>
+          <div class="note-card-summary">${note.summary}</div>
+          <div class="note-card-meta">
+            <span>${note.date}</span>
+            ${note.tags.map(t => `<span class="note-card-tag">${t}</span>`).join('')}
+          </div>
+        </div>
+      `).join('');
+    }
+
+    function selectNote(id) {
+      selectedNoteId = id;
+      renderNoteList();
+      renderEditor();
+    }
+
+    /* ─── Editor Rendering ─── */
+    function renderEditor() {
+      const container = document.getElementById('editor');
+      const note = notes.find(n => n.id === selectedNoteId);
+      if (!note) {
+        container.innerHTML = `
+          <div class="empty-state">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/>
+              <polyline points="13 2 13 9 20 9"/>
+            </svg>
+            <p>选择一篇笔记开始阅读或编辑</p>
+          </div>
+        `;
+        return;
+      }
+
+      container.innerHTML = `
+        <div class="editor-toolbar">
+          <div class="toolbar-group">
+            <button class="toolbar-btn" title="粗体"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 4h8a4 4 0 0 1 4 4 4 4 0 0 1-4 4H6z"/><path d="M6 12h9a4 4 0 0 1 4 4 4 4 0 0 1-4 4H6z"/></svg></button>
+            <button class="toolbar-btn" title="斜体"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="19" y1="4" x2="10" y2="4"/><line x1="14" y1="20" x2="5" y2="20"/><line x1="15" y1="4" x2="9" y2="20"/></svg></button>
+            <button class="toolbar-btn" title="标题"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 12h12"/><path d="M6 20V4"/><path d="M18 20V4"/></svg></button>
+            <button class="toolbar-btn" title="列表"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg></button>
+            <button class="toolbar-btn" title="代码块"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg></button>
+          </div>
+          <div class="toolbar-group">
+            <button class="toolbar-btn" title="删除" onclick="alert('原型：删除笔记')">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+            </button>
+          </div>
+        </div>
+
+        <div class="editor-body">
+          <input class="editor-title-input" value="${note.title}" />
+          <div class="editor-meta-bar">
+            <span class="editor-meta-item">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+              ${note.date}
+            </span>
+            <span class="editor-meta-item">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/><line x1="7" y1="7" x2="7.01" y2="7"/></svg>
+              ${note.tags.join('、')}
+            </span>
+            <span class="editor-meta-item">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+              ${note.pinned ? '已置顶' : '未置顶'}
+            </span>
+          </div>
+          <div class="ai-bar">
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 2a2 2 0 0 1 2 2c0 .74-.4 1.387-1 1.732V7h1a7 7 0 0 1 7 7h1a2 2 0 0 1 2 2c0 .74-.4 1.387-1 1.732V20a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2v-1.268A2 2 0 0 1 1 16a2 2 0 0 1 2-2h1a7 7 0 0 1 7-7h1V5.732A2 2 0 0 1 9 4a2 2 0 0 1 2-2z"/>
+              <path d="M9 13h6"/><path d="M9 17h3"/>
+            </svg>
+            <span class="ai-bar-text">AI助手可以帮你续写、润色或总结这篇笔记</span>
+            <button class="ai-bar-btn" onclick="alert('原型：调用 AI 助手')">AI 助手</button>
+          </div>
+
+          <textarea class="editor-textarea" placeholder="开始写作…">${note.content}</textarea>
+        </div>
+      `;
+    }
+
+    /* ─── Chat Rendering ─── */
+    function renderChat() {
+      const container = document.getElementById('chat-messages');
+      container.innerHTML = chatMessages.map(msg => `
+        <div class="chat-message ${msg.role}">
+          <div class="chat-avatar">${msg.role === 'user' ? '张' : 'AI'}</div>
+          <div class="chat-bubble">${msg.content}</div>
+        </div>
+      `).join('');
+      container.scrollTop = container.scrollHeight;
+    }
+
+    /* ─── Theme Toggle ─── */
+    function initTheme() {
+      const saved = localStorage.getItem('theme');
+      if (saved === 'dark' || (!saved && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
+        setTheme(true);
+      }
+      document.getElementById('theme-toggle').addEventListener('click', () => setTheme(!dark));
+    }
+
+    function setTheme(isDark) {
+      dark = isDark;
+      document.documentElement.setAttribute('data-theme', dark ? 'dark' : 'light');
+      document.getElementById('icon-sun').style.display = dark ? 'none' : 'block';
+      document.getElementById('icon-moon').style.display = dark ? 'block' : 'none';
+      localStorage.setItem('theme', dark ? 'dark' : 'light');
+    }
+
+    /* ─── Init ─── */
+    renderTree(categories, document.getElementById('category-tree'));
+    renderNoteList();
+    renderEditor();
+    initTheme();
+  </script>
+</body>
+</html>

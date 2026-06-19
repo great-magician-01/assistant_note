@@ -1,9 +1,10 @@
 """User ORM model."""
 
-from sqlalchemy import BigInteger, SmallInteger, String
+from sqlalchemy import BigInteger, Index, SmallInteger, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from backend.apps.model.base import Base, TimestampMixin
+from backend.apps.model.role import ROLE_ID_USER
 from backend.apps.utils.snowflake import snowflake_id
 
 
@@ -32,10 +33,22 @@ class User(Base, TimestampMixin):
         nullable=False,
         comment="密码(bcrypt)",
     )
+    role_id: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+        default=ROLE_ID_USER,
+        server_default="1",
+        index=True,
+        comment="角色ID(引用roles, 默认1=普通用户)",
+    )
     is_active: Mapped[int] = mapped_column(
         SmallInteger,
         nullable=False,
         default=1,
         server_default="1",
         comment="是否启用(0-禁用 1-启用)",
+    )
+
+    __table_args__ = (
+        Index("ix_users_role_id", "role_id"),
     )

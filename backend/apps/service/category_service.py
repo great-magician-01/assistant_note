@@ -1,12 +1,16 @@
 """Category business logic: CRUD and tree assembly."""
 
+import logging
 from typing import Any, Optional
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.apps.model.category import Category
+from backend.apps.model.note import Note
 from backend.apps.utils.exceptions import BusinessError, NotFoundError
+
+logger = logging.getLogger(__name__)
 
 
 async def list_categories(
@@ -14,6 +18,23 @@ async def list_categories(
     user_id: int,
 ) -> list[dict]:
     """Get all non-deleted categories for a user and assemble into tree."""
+    logger.debug("List categories: user_id=%s", user_id)
+    roots, _ = await build_category_tree(db, user_id)
+    logger.debug("List categories: user_id=%s returned %d root categories", user_id, len(roots))
+    return roots
+
+
+async def build_category_tree(
+    db: AsyncSession,
+    user_id: int,
+) -> tuple[list[dict], dict[int, dict]]:
+    """Load all non-deleted categories for a user and assemble into a tree.
+
+    Returns ``(roots, node_map)`` where ``roots`` is the list of top-level
+    nodes (each carrying a ``children`` list) and ``node_map`` maps
+    ``category_id`` → node dict for O(1) lookup. Shared by ``list_categories``
+    and the combined note/category tree query so the tree is built once.
+    """
     result = await db.execute(
         select(Category)
         .where(Category.user_id == user_id, Category.is_deleted == 0)
@@ -21,7 +42,6 @@ async def list_categories(
     )
     categories = result.scalars().all()
 
-    # Build tree
     node_map: dict[int, dict] = {}
     roots: list[dict] = []
 
@@ -37,7 +57,7 @@ async def list_categories(
         else:
             node_map[cat.parent_id]["children"].append(node)
 
-    return roots
+    return roots, node_map
 
 
 async def create_category(
@@ -52,6 +72,7 @@ async def create_category(
 
     Raises NotFoundError if the parent does not exist, BusinessError on name conflict.
     """
+    logger.debug("Create category: user_id=%s, name=%s, parent_id=%s", user_id, category_name, parent_id)
     # Validate parent exists and belongs to user
     if parent_id is not None:
         result = await db.execute(
@@ -62,6 +83,7 @@ async def create_category(
             )
         )
         if result.scalar_one_or_none() is None:
+            logger.warning("Create category failed: parent_id=%s not found (user_id=%s)", parent_id, user_id)
             raise NotFoundError("父分类不存在")
 
     # Check duplicate name under same parent
@@ -74,6 +96,8 @@ async def create_category(
         )
     )
     if result.scalar_one_or_none() is not None:
+        logger.warning("Create category failed: name=%s conflict under parent_id=%s (user_id=%s)",
+                       category_name, parent_id, user_id)
         raise BusinessError("同一父分类下已存在同名分类")
 
     category = Category(
@@ -85,6 +109,8 @@ async def create_category(
     )
     db.add(category)
     await db.flush()
+    logger.info("Create category success: category_id=%s, name=%s, user_id=%s",
+                category.category_id, category_name, user_id)
     return category
 
 
@@ -103,6 +129,7 @@ async def update_category(
     Raises NotFoundError if the category/parent does not exist,
     BusinessError on name conflict or invalid move.
     """
+    logger.debug("Update category: category_id=%s, fields=%s, user_id=%s", category_id, list(fields.keys()), user_id)
     result = await db.execute(
         select(Category).where(
             Category.category_id == category_id,
@@ -112,14 +139,19 @@ async def update_category(
     )
     category = result.scalar_one_or_none()
     if category is None:
+        logger.warning("Update category failed: category_id=%s not found (user_id=%s)", category_id, user_id)
         raise NotFoundError("分类不存在")
 
     # Determine the effective parent (new one if being changed, else current)
     effective_parent = fields.get("parent_id", category.parent_id) if "parent_id" in fields else category.parent_id
 
-    # Name change → check duplicate under the effective parent
-    if "category_name" in fields:
-        new_name = fields["category_name"]
+    # Name OR parent change → check duplicate under the effective parent. A
+    # pure move (parent changed, name unchanged) must also be checked, or the
+    # partial unique index uq_category_user_name_parent would raise an
+    # IntegrityError (→500) instead of a clean BusinessError when the target
+    # parent already has a non-deleted sibling with the same name.
+    if "category_name" in fields or "parent_id" in fields:
+        new_name = fields.get("category_name", category.category_name)
         dup_result = await db.execute(
             select(Category).where(
                 Category.user_id == user_id,
@@ -130,8 +162,11 @@ async def update_category(
             )
         )
         if dup_result.scalar_one_or_none() is not None:
+            logger.warning("Update category failed: name=%s conflict under parent_id=%s (user_id=%s)",
+                           new_name, effective_parent, user_id)
             raise BusinessError("同一父分类下已存在同名分类")
-        category.category_name = new_name
+        if "category_name" in fields:
+            category.category_name = new_name
 
     if "category_icon" in fields:
         category.category_icon = fields["category_icon"]
@@ -143,6 +178,7 @@ async def update_category(
         new_parent = fields["parent_id"]
         if new_parent is not None:
             if new_parent == category_id:
+                logger.warning("Update category failed: self-parent attempted (category_id=%s)", category_id)
                 raise BusinessError("不能将自己设为父分类")
             result = await db.execute(
                 select(Category).where(
@@ -152,13 +188,17 @@ async def update_category(
                 )
             )
             if result.scalar_one_or_none() is None:
+                logger.warning("Update category failed: parent_id=%s not found (user_id=%s)", new_parent, user_id)
                 raise NotFoundError("父分类不存在")
             # Prevent circular reference: new parent must not be a descendant
             if await _is_descendant(db, user_id, category_id, new_parent):
+                logger.warning("Update category failed: circular move (category_id=%s -> parent_id=%s)",
+                               category_id, new_parent)
                 raise BusinessError("不能将分类移动到自己的子分类下")
         category.parent_id = new_parent
 
     await db.flush()
+    logger.info("Update category success: category_id=%s, user_id=%s", category_id, user_id)
     return category
 
 
@@ -168,6 +208,7 @@ async def delete_category(
     category_id: int,
 ) -> None:
     """Soft delete a category and all its descendants."""
+    logger.debug("Delete category: category_id=%s, user_id=%s", category_id, user_id)
     result = await db.execute(
         select(Category).where(
             Category.category_id == category_id,
@@ -177,13 +218,36 @@ async def delete_category(
     )
     category = result.scalar_one_or_none()
     if category is None:
+        logger.warning("Delete category failed: category_id=%s not found (user_id=%s)", category_id, user_id)
         raise NotFoundError("分类不存在")
 
     # Collect all descendant IDs
     all_ids = await _get_descendant_ids(db, user_id, category_id)
     all_ids.add(category_id)
 
+    # Block deletion if any non-deleted notes live under this category or its
+    # descendants — otherwise those notes would be orphaned (category_id points
+    # at a soft-deleted category). The user must move or delete them first.
+    note_count_result = await db.execute(
+        select(func.count(Note.note_id)).where(
+            Note.user_id == user_id,
+            Note.category_id.in_(all_ids),
+            Note.is_deleted == 0,
+        )
+    )
+    note_count = note_count_result.scalar_one()
+    if note_count > 0:
+        logger.warning(
+            "Delete category blocked: %d notes under subtree (root_id=%s, user_id=%s)",
+            note_count, category_id, user_id,
+        )
+        raise BusinessError(
+            f"分类下存在 {note_count} 篇笔记，请先移动或删除笔记后再删除分类"
+        )
+
     # Soft delete all
+    logger.info("Delete category: soft-deleting %d categories (root_id=%s, user_id=%s)",
+                len(all_ids), category_id, user_id)
     for cid in all_ids:
         r = await db.execute(
             select(Category).where(Category.category_id == cid)
