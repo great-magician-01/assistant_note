@@ -52,16 +52,20 @@ async function submit() {
   try {
     if (mode.value === 'login') {
       await authStore.login(account.value.trim(), password.value)
+      toast.success('登录成功')
+      const redirect = (route.query.redirect as string) || '/'
+      router.replace(redirect)
     } else {
       await authStore.register({
         user_account: account.value.trim(),
         user_name: userName.value.trim(),
         password: password.value,
       })
+      // Approval-gated registration: no auto-login. Tell the user and return
+      // to the login tab so they can come back once an admin approves them.
+      toast.success('注册成功，请等待管理员审核后登录')
+      switchMode('login')
     }
-    toast.success(mode.value === 'login' ? '登录成功' : '注册成功')
-    const redirect = (route.query.redirect as string) || '/'
-    router.replace(redirect)
   } catch (err) {
     toast.error(extractErrorMessage(err, mode.value === 'login' ? '登录失败' : '注册失败'))
   } finally {
@@ -158,7 +162,7 @@ async function submit() {
 
 <style scoped>
 .login-page {
-  height: 100vh;
+  min-height: 100dvh;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -172,7 +176,12 @@ async function submit() {
   border: 1px solid var(--border);
   border-radius: 16px;
   box-shadow: var(--shadow-lg);
-  padding: 36px 32px;
+  padding: 28px 24px;
+}
+@media (min-width: 768px) {
+  .login-card {
+    padding: 36px 32px;
+  }
 }
 .brand {
   text-align: center;

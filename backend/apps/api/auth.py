@@ -45,11 +45,19 @@ class TokenResponse(BaseModel):
     user_account: str | None = None
 
 
+class RegisterResponse(BaseModel):
+    user_id: SnowflakeId
+    user_account: str
+    user_name: str
+    message: str
+
+
 class UserInfoResponse(BaseModel):
     user_id: SnowflakeId
     user_account: str
     user_name: str
     is_active: int
+    audit_status: int
     role_id: SnowflakeId
     role_code: str | None = None
 
@@ -57,7 +65,7 @@ class UserInfoResponse(BaseModel):
 # ── Endpoints ────────────────────────────────────────────────────────────────
 
 
-@router.post("/register", response_model=TokenResponse, summary="用户注册")
+@router.post("/register", response_model=RegisterResponse, summary="用户注册")
 async def register(
     body: RegisterRequest,
     db: AsyncSession = Depends(get_db),
@@ -69,7 +77,7 @@ async def register(
         user_name=body.user_name,
         password=body.password,
     )
-    return TokenResponse(**result)
+    return RegisterResponse(**result)
 
 
 @router.post("/login", response_model=TokenResponse, summary="用户登录")
@@ -113,6 +121,7 @@ async def me(
         user_account=user.user_account,
         user_name=user.user_name,
         is_active=user.is_active,
+        audit_status=user.audit_status,
         role_id=user.role_id,
         role_code=role.role_code if role else None,
     )

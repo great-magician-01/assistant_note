@@ -36,7 +36,10 @@ async def register(
     user_name: str,
     password: str,
 ) -> dict:
-    """Register a new user and return token payload.
+    """Register a new user (pending admin approval) and return a summary.
+
+    The account is created with ``audit_status=0`` (待审核) — no tokens are
+    issued; the user cannot log in until an admin approves them.
 
     Raises BusinessError if the account already exists.
     """
@@ -52,11 +55,17 @@ async def register(
         user_account=user_account,
         user_name=user_name,
         user_password=hash_password(password),
+        audit_status=0,
     )
     db.add(user)
     await db.flush()
-    logger.info("Register success: user_id=%s, account=%s", user.user_id, user_account)
-    return _build_token_payload(user)
+    logger.info("Register success (pending approval): user_id=%s, account=%s", user.user_id, user_account)
+    return {
+        "user_id": user.user_id,
+        "user_account": user.user_account,
+        "user_name": user.user_name,
+        "message": "注册成功，请等待管理员审核",
+    }
 
 
 async def login(
@@ -74,13 +83,21 @@ async def login(
     )
     user = result.scalar_one_or_none()
 
-    if user is None or user.is_active != 1:
-        logger.warning("Login failed: account=%s not found or inactive", user_account)
-        raise BusinessError("账号不存在或已禁用")
+    # Verify credentials first (don't leak whether the account exists vs. the
+    # password is wrong), then gate on audit status / active flag.
+    if user is None or not verify_password(password, user.user_password):
+        logger.warning("Login failed: bad credentials for account=%s", user_account)
+        raise BusinessError("账号或密码错误")
 
-    if not verify_password(password, user.user_password):
-        logger.warning("Login failed: wrong password for account=%s", user_account)
-        raise BusinessError("密码错误")
+    if user.audit_status == 0:
+        logger.warning("Login failed: account=%s pending approval", user_account)
+        raise BusinessError("账号待审核，请等待管理员通过")
+    if user.audit_status == 2:
+        logger.warning("Login failed: account=%s rejected", user_account)
+        raise BusinessError("注册申请已被拒绝，请联系管理员")
+    if user.is_active != 1:
+        logger.warning("Login failed: account=%s disabled", user_account)
+        raise BusinessError("账号已被禁用")
 
     logger.info("Login success: user_id=%s, account=%s", user.user_id, user_account)
     return _build_token_payload(user)
@@ -103,8 +120,8 @@ async def refresh_access_token(
     result = await db.execute(select(User).where(User.user_id == user_id))
     user = result.scalar_one_or_none()
 
-    if user is None or user.is_active != 1:
-        logger.warning("Refresh failed: user_id=%s not found or inactive", user_id)
+    if user is None or user.is_active != 1 or user.audit_status != 1:
+        logger.warning("Refresh failed: user_id=%s not found/inactive/not approved", user_id)
         raise BusinessError("用户不存在或已禁用")
 
     logger.info("Refresh success: user_id=%s", user_id)
@@ -135,6 +152,7 @@ async def ensure_admin_account(
             user_name="管理员",
             user_password=hash_password(password),
             role_id=ROLE_ID_ADMIN,
+            audit_status=1,
         )
         db.add(user)
         logger.info("Admin bootstrap: created admin account=%s", account)
@@ -143,6 +161,8 @@ async def ensure_admin_account(
         user.user_password = hash_password(password)
         if user.is_active != 1:
             user.is_active = 1
+        if user.audit_status != 1:
+            user.audit_status = 1
         logger.info("Admin bootstrap: ensured admin role + reset password for account=%s", account)
 
     await db.flush()

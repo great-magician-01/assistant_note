@@ -11,7 +11,7 @@ const emit = defineEmits<{ close: [] }>()
 
 <template>
   <Teleport to="body">
-    <div class="modal-overlay" @click.self="emit('close')">
+    <div class="modal-overlay p-3 md:p-5" @click.self="emit('close')">
       <div class="modal" :style="{ maxWidth: width ?? '420px' }">
         <div class="modal-header">
           <span class="modal-title">{{ title }}</span>
@@ -39,7 +39,6 @@ const emit = defineEmits<{ close: [] }>()
   align-items: center;
   justify-content: center;
   z-index: 1000;
-  padding: 20px;
   animation: fade 0.15s ease;
 }
 @keyframes fade {
@@ -76,6 +75,7 @@ const emit = defineEmits<{ close: [] }>()
 }
 .modal-footer {
   display: flex;
+  flex-wrap: wrap;
   justify-content: flex-end;
   gap: 8px;
   padding: 12px 18px;

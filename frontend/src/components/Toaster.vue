@@ -47,7 +47,7 @@ const toast = useToast()
   border: 1px solid var(--border);
   box-shadow: var(--shadow-lg);
   color: var(--text-primary);
-  max-width: 460px;
+  max-width: min(460px, calc(100vw - 32px));
   cursor: pointer;
 }
 .dot {

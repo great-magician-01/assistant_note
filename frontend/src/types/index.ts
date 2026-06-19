@@ -14,6 +14,7 @@ export interface UserInfo {
   user_account: string
   user_name: string
   is_active: number
+  audit_status: number
   role_id: SnowflakeId
   role_code: string | null
 }
@@ -24,6 +25,48 @@ export interface TokenResponse {
   user_id: SnowflakeId
   user_name: string
   user_account: string | null
+}
+
+/** Register response — no tokens (account is pending admin approval). */
+export interface RegisterResponse {
+  user_id: SnowflakeId
+  user_account: string
+  user_name: string
+  message: string
+}
+
+/** Audit status mirror (backend migration 009). */
+export const USER_AUDIT_STATUS = {
+  PENDING: 0,
+  APPROVED: 1,
+  REJECTED: 2,
+} as const
+
+/** Admin user-management row (mirrors UserResponse). */
+export interface UserItem {
+  user_id: SnowflakeId
+  user_account: string
+  user_name: string
+  role_id: SnowflakeId
+  role_code: string | null
+  role_name: string | null
+  is_active: number
+  audit_status: number
+  created_at: string | null
+}
+
+export interface UserListResponse {
+  items: UserItem[]
+  total: number
+  page: number
+  page_size: number
+}
+
+export interface UserListParams {
+  status?: number | null
+  keyword?: string | null
+  page?: number
+  page_size?: number
 }
 
 export interface CategoryNode {

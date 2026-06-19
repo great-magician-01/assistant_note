@@ -15,7 +15,7 @@ import type { SnowflakeId } from '@/types'
 const props = defineProps<{
   selectedCategoryId: SnowflakeId | null
   selectedNoteId: SnowflakeId | null
-  activeView: 'notes' | 'chat' | 'settings'
+  activeView: 'notes' | 'chat' | 'settings' | 'users'
   keyword: string
 }>()
 
@@ -31,6 +31,7 @@ const emit = defineEmits<{
   remove: [node: import('@/types').CategoryNode]
   'select-chat': []
   'select-settings': []
+  'select-users': []
   logout: []
 }>()
 
@@ -215,6 +216,16 @@ const uncategorized = () => noteStore.tree?.uncategorized ?? []
         <Icon name="settings" :size="16" class="row-icon" />
         <span class="tree-label">AI 设置</span>
       </div>
+      <div
+        v-if="authStore.isAdmin"
+        class="tree-row ai-row"
+        :class="{ active: activeView === 'users' }"
+        @click="emit('select-users')"
+      >
+        <span class="tree-toggle" style="visibility: hidden"></span>
+        <Icon name="user" :size="16" class="row-icon" />
+        <span class="tree-label">用户审核</span>
+      </div>
     </div>
 
     <!-- Footer -->
@@ -238,12 +249,10 @@ const uncategorized = () => noteStore.tree?.uncategorized ?? []
 
 <style scoped>
 .sidebar {
-  width: var(--sidebar-width);
   background: var(--bg-sidebar);
   border-right: 1px solid var(--border);
   display: flex;
   flex-direction: column;
-  flex-shrink: 0;
   transition: background 0.3s, border-color 0.3s;
 }
 .sidebar-header {
@@ -294,7 +303,7 @@ const uncategorized = () => noteStore.tree?.uncategorized ?? []
 .sidebar-content {
   flex: 1;
   overflow-y: auto;
-  padding: 8px 10px;
+  padding: 10px 12px;
 }
 .tree-section-title {
   font-size: 11px;
@@ -365,7 +374,7 @@ const uncategorized = () => noteStore.tree?.uncategorized ?? []
 
 /* AI navigation block (always visible, sits between content and footer) */
 .sidebar-ai-nav {
-  padding: 0 10px 4px;
+  padding: 0 12px 4px;
   border-top: 1px solid var(--border);
 }
 

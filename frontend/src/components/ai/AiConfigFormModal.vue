@@ -139,7 +139,7 @@ async function submit() {
 <template>
   <Modal v-if="visible" :title="titleText" width="560px" @close="emit('update:visible', false)">
     <div class="form">
-      <div class="row">
+      <div class="row flex flex-col md:flex-row gap-3">
         <label class="field">
           <span class="label">配置名称 <span class="req">*</span></span>
           <input v-model="configName" class="input" placeholder="如：默认对话" maxlength="100" />
@@ -182,7 +182,7 @@ async function submit() {
         <div v-else class="hint">暂无可用工具</div>
       </div>
 
-      <div class="row">
+      <div class="row flex flex-col md:flex-row gap-3">
         <label class="field">
           <span class="label">Temperature (0-2)</span>
           <input v-model.number="temperature" type="number" min="0" max="2" step="0.1" class="input" placeholder="默认" />
@@ -227,10 +227,6 @@ async function submit() {
   display: flex;
   flex-direction: column;
   gap: 14px;
-}
-.row {
-  display: flex;
-  gap: 12px;
 }
 .row .field {
   flex: 1;

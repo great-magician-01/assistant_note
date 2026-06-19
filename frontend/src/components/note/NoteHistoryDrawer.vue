@@ -214,9 +214,9 @@ watch(
 
 <template>
   <Modal v-if="visible" title="历史记录" width="900px" @close="close">
-    <div class="history-wrap">
+    <div class="history-wrap flex flex-col md:flex-row gap-4 h-[80vh] md:h-[70vh] min-h-0">
       <!-- Left: list -->
-      <div class="history-list">
+      <div class="history-list w-full md:w-[260px] md:flex-shrink-0 max-h-[30vh] md:max-h-none overflow-y-auto">
         <div v-if="loading && !histories.length" class="history-empty">加载中…</div>
         <div v-else-if="!histories.length" class="history-empty">暂无历史记录</div>
         <ul v-else class="history-items">
@@ -336,18 +336,9 @@ watch(
 </template>
 
 <style scoped>
-.history-wrap {
-  display: flex;
-  gap: 16px;
-  height: 70vh;
-  min-height: 420px;
-}
 .history-list {
-  width: 260px;
-  flex-shrink: 0;
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  overflow-y: auto;
   background: var(--bg-input);
 }
 .history-items {

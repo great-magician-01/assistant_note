@@ -238,13 +238,16 @@ function onKeydown(e: KeyboardEvent) {
 </script>
 
 <template>
-  <aside class="note-ai-drawer" :class="{ open: visible }">
+  <aside
+    v-show="visible"
+    class="note-ai-drawer flex flex-col bg-[var(--bg-main)] border-l border-[var(--border)] fixed inset-0 z-50 w-full md:static md:z-auto md:w-[420px] md:flex-shrink-0"
+  >
     <header class="drawer-header">
       <div class="drawer-title-wrap">
         <div class="drawer-title-icon"><Icon name="robot" :size="16" /></div>
         <div class="drawer-title-text">
           <div class="drawer-title">笔记 AI 助手</div>
-          <div class="drawer-sub" :title="noteTitle || ''">{{ noteTitle || '当前笔记' }}</div>
+          <div class="drawer-sub max-w-[min(240px,60vw)]" :title="noteTitle || ''">{{ noteTitle || '当前笔记' }}</div>
         </div>
       </div>
       <div class="drawer-actions">
@@ -303,18 +306,7 @@ function onKeydown(e: KeyboardEvent) {
 
 <style scoped>
 .note-ai-drawer {
-  width: 0;
-  overflow: hidden;
   background: var(--bg-main);
-  border-left: 1px solid transparent;
-  display: flex;
-  flex-direction: column;
-  flex-shrink: 0;
-  transition: width 0.25s ease, border-color 0.25s ease;
-}
-.note-ai-drawer.open {
-  width: 420px;
-  border-left-color: var(--border);
 }
 .drawer-header {
   display: flex;
@@ -355,7 +347,6 @@ function onKeydown(e: KeyboardEvent) {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  max-width: 240px;
 }
 .drawer-actions {
   display: flex;

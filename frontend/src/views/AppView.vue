@@ -1,10 +1,12 @@
 <script setup lang="ts">
-import { ref, watch, onMounted, onBeforeUnmount } from 'vue'
+import { ref, watch, onMounted, onBeforeUnmount, computed } from 'vue'
 import { useRouter } from 'vue-router'
+import Icon from '@/components/Icon.vue'
 import AppSidebar from '@/components/layout/AppSidebar.vue'
 import NoteEditor from '@/components/note/NoteEditor.vue'
 import AiChat from '@/components/ai/AiChat.vue'
 import AiSettings from '@/components/ai/AiSettings.vue'
+import UserManage from '@/components/admin/UserManage.vue'
 import Toaster from '@/components/Toaster.vue'
 import CategoryFormModal from '@/components/category/CategoryFormModal.vue'
 import { useAuthStore } from '@/stores/auth'
@@ -23,7 +25,21 @@ const toast = useToast()
 const keyword = ref('')
 const activeTag = ref<string | null>(null)
 const selectedCategoryId = ref<SnowflakeId | null>(null)
-const activeView = ref<'notes' | 'chat' | 'settings'>('notes')
+const activeView = ref<'notes' | 'chat' | 'settings' | 'users'>('notes')
+
+// Mobile sidebar drawer state. On desktop (md+) the sidebar is always visible
+// (static, translate-x-0), so this flag only affects the mobile overlay.
+const sidebarOpen = ref(false)
+function closeSidebar() {
+  sidebarOpen.value = false
+}
+const sidebarClass = computed(() => [
+  // Mobile: fixed overlay drawer, hidden off-canvas by default.
+  // Desktop: static, always visible.
+  'fixed inset-y-0 left-0 z-40 w-[min(86vw,var(--sidebar-width))] transition-transform duration-200',
+  sidebarOpen.value ? 'translate-x-0' : '-translate-x-full',
+  'md:static md:translate-x-0 md:z-auto md:w-[var(--sidebar-width)] md:flex-shrink-0',
+])
 
 // Category modal state
 const modalVisible = ref(false)
@@ -64,10 +80,12 @@ async function onCategorySaved() {
 function selectCategory(id: SnowflakeId) {
   selectedCategoryId.value = id
   activeView.value = 'notes'
+  closeSidebar()
 }
 
 async function selectNote(id: SnowflakeId) {
   activeView.value = 'notes'
+  closeSidebar()
   try {
     await noteStore.selectNote(id)
   } catch (err) {
@@ -78,15 +96,24 @@ async function selectNote(id: SnowflakeId) {
 function selectChat() {
   activeView.value = 'chat'
   noteStore.clearSelection()
+  closeSidebar()
 }
 
 function selectSettings() {
   activeView.value = 'settings'
   noteStore.clearSelection()
+  closeSidebar()
+}
+
+function selectUsers() {
+  activeView.value = 'users'
+  noteStore.clearSelection()
+  closeSidebar()
 }
 
 async function newNote(categoryId: SnowflakeId | null = selectedCategoryId.value) {
   activeView.value = 'notes'
+  closeSidebar()
   try {
     await noteStore.create({
       note_title: '无标题笔记',
@@ -140,8 +167,27 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="app">
+  <div class="flex flex-col md:flex-row h-[100dvh]">
+    <!-- Mobile top bar (hamburger to open the sidebar drawer) -->
+    <header
+      class="md:hidden flex items-center gap-2 h-[var(--header-height)] px-3 flex-shrink-0 border-b border-[var(--border)] bg-[var(--bg-sidebar)]"
+    >
+      <button class="btn-icon" title="菜单" @click="sidebarOpen = true">
+        <Icon name="menu" :size="20" />
+      </button>
+      <img src="/favicon.svg" alt="智能笔记" class="w-7 h-7" />
+      <span class="font-semibold text-[var(--text-primary)]">智能笔记</span>
+    </header>
+
+    <!-- Mobile sidebar backdrop -->
+    <div
+      v-if="sidebarOpen"
+      class="md:hidden fixed inset-0 bg-black/40 z-30"
+      @click="closeSidebar"
+    />
+
     <AppSidebar
+      :class="sidebarClass"
       :selected-category-id="selectedCategoryId"
       :selected-note-id="noteStore.selectedId"
       :active-view="activeView"
@@ -157,13 +203,15 @@ onBeforeUnmount(() => {
       @remove="confirmRemoveCategory"
       @select-chat="selectChat"
       @select-settings="selectSettings"
+      @select-users="selectUsers"
       @logout="logout"
     />
 
-    <main class="main">
+    <main class="flex-1 flex flex-col min-w-0 min-h-0">
       <NoteEditor v-show="activeView === 'notes'" />
       <AiChat v-show="activeView === 'chat'" />
       <AiSettings v-show="activeView === 'settings'" :visible="activeView === 'settings'" />
+      <UserManage v-show="activeView === 'users'" :visible="activeView === 'users'" />
     </main>
 
     <CategoryFormModal
@@ -175,16 +223,3 @@ onBeforeUnmount(() => {
     <Toaster />
   </div>
 </template>
-
-<style scoped>
-.app {
-  display: flex;
-  height: 100vh;
-}
-.main {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-}
-</style>

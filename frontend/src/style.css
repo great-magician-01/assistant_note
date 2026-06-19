@@ -29,6 +29,8 @@
   --sidebar-width: 280px;
   --header-height: 52px;
   --radius: 8px;
+  /* Max reading column for the note preview, centered inside the editor pane. */
+  --reading-width: 820px;
 
   --danger: #dc2626;
   --danger-light: #fee2e2;
@@ -88,12 +90,12 @@ html {
 body {
   background: var(--bg-body);
   color: var(--text-secondary);
-  height: 100vh;
+  height: 100dvh;
   overflow: hidden;
 }
 
 #app {
-  height: 100vh;
+  height: 100dvh;
 }
 
 button {

@@ -147,7 +147,7 @@ async function submit() {
         <input v-model="name" class="input" placeholder="如：DeepSeek 官方" maxlength="100" />
       </label>
 
-      <div class="row">
+      <div class="row flex flex-col md:flex-row gap-3">
         <label class="field">
           <span class="label">接口格式 <span class="req">*</span></span>
           <select v-model="apiFormat" class="input">
@@ -170,7 +170,7 @@ async function submit() {
         <input v-model="apiKey" type="password" class="input" placeholder="sk-..." maxlength="500" />
       </label>
 
-      <div class="row">
+      <div class="row flex flex-col md:flex-row gap-3">
         <label class="field">
           <span class="label">最大 Tokens</span>
           <input v-model.number="maxTokens" type="number" min="1" class="input" />
@@ -219,10 +219,6 @@ async function submit() {
   display: flex;
   flex-direction: column;
   gap: 14px;
-}
-.row {
-  display: flex;
-  gap: 12px;
 }
 .row .field {
   flex: 1;

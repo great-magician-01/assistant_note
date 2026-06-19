@@ -404,14 +404,14 @@ onBeforeUnmount(() => {
     </div>
 
     <template v-else>
-      <div class="editor-toolbar">
+      <div class="editor-toolbar py-3.5 px-4 md:py-4 md:px-8">
         <div class="toolbar-group">
           <span class="editor-mode-label" :class="{ 'mode-edit': mode === 'edit' }">
             {{ mode === 'edit' ? '编辑模式' : '预览模式' }}
           </span>
         </div>
         <div class="toolbar-group">
-          <span class="save-status">{{ saving ? '保存中…' : '已保存' }}</span>
+          <span class="save-status hidden md:inline">{{ saving ? '保存中…' : '已保存' }}</span>
           <button
             v-if="mode === 'preview'"
             class="toolbar-btn primary-btn"
@@ -419,7 +419,7 @@ onBeforeUnmount(() => {
             @click="switchToEdit"
           >
             <Icon name="edit" :size="16" />
-            <span class="btn-text">编辑</span>
+            <span class="btn-text hidden md:inline">编辑</span>
           </button>
           <button
             v-else
@@ -428,7 +428,7 @@ onBeforeUnmount(() => {
             @click="switchToPreview"
           >
             <Icon name="book" :size="16" />
-            <span class="btn-text">完成</span>
+            <span class="btn-text hidden md:inline">完成</span>
           </button>
           <button
             class="toolbar-btn"
@@ -457,7 +457,7 @@ onBeforeUnmount(() => {
 
       <div class="editor-workspace">
         <!-- Read-only preview (default when opening a note) -->
-        <div v-show="mode === 'preview'" class="editor-body preview-body">
+        <div v-show="mode === 'preview'" class="editor-body preview-body p-5 md:py-6 md:px-8">
           <h1 class="preview-title">{{ title || '无标题' }}</h1>
 
           <div class="editor-meta-bar">
@@ -490,7 +490,7 @@ onBeforeUnmount(() => {
         </div>
 
         <!-- Edit mode (Vditor) -->
-        <div v-show="mode === 'edit'" class="editor-body">
+        <div v-show="mode === 'edit'" class="editor-body p-5 md:py-6 md:px-8">
           <input
             v-model="title"
             class="editor-title-input"
@@ -563,6 +563,8 @@ onBeforeUnmount(() => {
   flex-direction: row;
   min-height: 0;
   overflow: hidden;
+  /* Breathing room between the toolbar and the note body. */
+  padding-top: 80px;
 }
 .empty-state {
   flex: 1;
@@ -583,7 +585,6 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 10px 20px;
   border-bottom: 1px solid var(--border);
   gap: 12px;
 }
@@ -628,7 +629,6 @@ onBeforeUnmount(() => {
 .editor-body {
   flex: 1;
   overflow-y: auto;
-  padding: 20px 24px;
   display: flex;
   flex-direction: column;
   /* Allow flex children (vditor-wrap) to shrink so vditor can fill height
@@ -740,7 +740,14 @@ onBeforeUnmount(() => {
 }
 /* ---- Preview mode ---- */
 .preview-body {
-  align-items: stretch;
+  /* Center the article (title/meta/tags/body) in a comfortable reading column
+     instead of spanning the full editor width — matches the framed feel of
+     edit mode and keeps line lengths readable on wide screens. */
+  align-items: center;
+}
+.preview-body > * {
+  width: 100%;
+  max-width: var(--reading-width);
 }
 .preview-title {
   font-size: 26px;

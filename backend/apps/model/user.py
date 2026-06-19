@@ -48,7 +48,15 @@ class User(Base, TimestampMixin):
         server_default="1",
         comment="是否启用(0-禁用 1-启用)",
     )
+    audit_status: Mapped[int] = mapped_column(
+        SmallInteger,
+        nullable=False,
+        default=0,
+        server_default="0",
+        comment="审核状态(0-待审核 1-已通过 2-已拒绝)",
+    )
 
     __table_args__ = (
         Index("ix_users_role_id", "role_id"),
+        Index("ix_users_audit_status", "audit_status"),
     )

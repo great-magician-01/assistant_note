@@ -122,8 +122,8 @@ async def get_current_user(
     result = await db.execute(select(User).where(User.user_id == user_id))
     user = result.scalar_one_or_none()
 
-    if user is None or user.is_active != 1:
-        logger.warning("Auth failed: user_id=%s not found or inactive", user_id)
+    if user is None or user.is_active != 1 or user.audit_status != 1:
+        logger.warning("Auth failed: user_id=%s not found/inactive/not approved", user_id)
         raise HTTPException(status_code=401, detail="User not found or inactive")
 
     # Sliding refresh: issue a new access token on every valid request

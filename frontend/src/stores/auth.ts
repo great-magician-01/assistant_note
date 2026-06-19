@@ -32,11 +32,12 @@ export const useAuthStore = defineStore('auth', () => {
     user_name: string
     password: string
   }) {
+    // Registration is approval-gated: the account is created in a pending
+    // state and no tokens are returned. We don't log the user in — the caller
+    // surfaces the "awaiting approval" message and returns to the login view.
     loading.value = true
     try {
-      const res = await authApi.register(body)
-      tokenStorage.set(res.access_token, res.refresh_token)
-      await fetchMe()
+      await authApi.register(body)
     } finally {
       loading.value = false
     }
