@@ -2,7 +2,9 @@
 import { ref } from 'vue'
 import dayjs from 'dayjs'
 import Icon from '@/components/Icon.vue'
-import type { CategoryTreeNode, SnowflakeId } from '@/types'
+import { useNoteStore } from '@/stores/note'
+import { useTreeDnd } from '@/composables/useTreeDnd'
+import type { CategoryTreeNode, NoteTreeItem, SnowflakeId } from '@/types'
 
 const props = defineProps<{
   nodes: CategoryTreeNode[]
@@ -11,6 +13,9 @@ const props = defineProps<{
   /** Indentation depth — only set on recursive self-invocations. */
   depth?: number
 }>()
+
+const noteStore = useNoteStore()
+const { dropTarget, beginDrag } = useTreeDnd()
 
 const emit = defineEmits<{
   'select-note': [id: SnowflakeId]
@@ -43,6 +48,23 @@ function formatDate(iso: string | null | undefined): string {
   const d = dayjs(iso)
   return d.isValid() ? d.format('MM-DD') : ''
 }
+
+// ── Drag & drop (pointer-based): arm a drag from pointerdown on a row ──
+function onNotePointerDown(note: NoteTreeItem, e: PointerEvent) {
+  beginDrag(
+    { type: 'note', id: note.note_id, categoryId: note.category_id, label: note.note_title || '无标题' },
+    e,
+    noteStore.tree?.categories ?? [],
+  )
+}
+
+function onCategoryPointerDown(node: CategoryTreeNode, e: PointerEvent) {
+  beginDrag(
+    { type: 'category', id: node.category_id, label: node.category_name },
+    e,
+    noteStore.tree?.categories ?? [],
+  )
+}
 </script>
 
 <template>
@@ -50,8 +72,14 @@ function formatDate(iso: string | null | undefined): string {
     <div v-for="node in nodes" :key="node.category_id" class="tree-node">
       <div
         class="tree-row"
-        :class="{ active: node.category_id === selectedCategoryId }"
+        :class="{
+          active: node.category_id === selectedCategoryId,
+          'drag-over': dropTarget === node.category_id,
+        }"
+        :data-drop-cat="node.category_id"
+        title="拖拽到其他分类可移动"
         @click="emit('select-category', node.category_id)"
+        @pointerdown="onCategoryPointerDown(node, $event)"
       >
         <span
           class="tree-toggle"
@@ -117,6 +145,7 @@ function formatDate(iso: string | null | undefined): string {
           :class="{ active: note.note_id === selectedNoteId }"
           :title="note.note_summary || note.note_preview || ''"
           @click="emit('select-note', note.note_id)"
+          @pointerdown="onNotePointerDown(note, $event)"
         >
           <Icon
             v-if="note.is_pinned"
@@ -154,6 +183,12 @@ function formatDate(iso: string | null | undefined): string {
 }
 .tree-row.active {
   background: var(--bg-active);
+  color: var(--text-accent);
+}
+.tree-row.drag-over {
+  background: var(--bg-active);
+  outline: 1px dashed var(--accent);
+  outline-offset: -1px;
   color: var(--text-accent);
 }
 .row-icon {
@@ -196,13 +231,33 @@ function formatDate(iso: string | null | undefined): string {
   text-align: center;
   flex-shrink: 0;
 }
+/* Action buttons float over the right edge as an overlay (absolute) so
+   revealing them on hover never reflows the label — that was the flicker. */
 .row-actions {
-  display: none;
-  gap: 1px;
-  flex-shrink: 0;
-}
-.tree-row:hover .row-actions {
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  transform: translateY(-50%);
   display: flex;
+  gap: 1px;
+  padding-left: 18px;
+  border-radius: 0 6px 6px 0;
+  background: linear-gradient(
+    to right,
+    transparent,
+    var(--bg-hover) 40%
+  );
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s;
+}
+.tree-row:hover .row-actions,
+.tree-row.active .row-actions {
+  opacity: 1;
+  pointer-events: auto;
+}
+.tree-row.active:hover .row-actions {
+  background: linear-gradient(to right, transparent, var(--bg-active) 40%);
 }
 .row-action {
   width: 22px;

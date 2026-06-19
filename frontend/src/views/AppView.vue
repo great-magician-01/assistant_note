@@ -79,11 +79,13 @@ async function onCategorySaved() {
 
 function selectCategory(id: SnowflakeId) {
   selectedCategoryId.value = id
+  noteStore.clearSelection() // selecting a category clears the active note
   activeView.value = 'notes'
   closeSidebar()
 }
 
 async function selectNote(id: SnowflakeId) {
+  selectedCategoryId.value = null // selecting a note clears the active category
   activeView.value = 'notes'
   closeSidebar()
   try {

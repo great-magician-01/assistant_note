@@ -26,7 +26,7 @@
   --accent-hover: #0369a1;
   --ring: rgba(2, 132, 199, 0.35);
 
-  --sidebar-width: 280px;
+  --sidebar-width: 320px;
   --header-height: 52px;
   --radius: 8px;
   /* Max reading column for the note preview, centered inside the editor pane. */
@@ -250,4 +250,38 @@ a {
 }
 [data-theme="dark"] .vditor-reset table tbody tr:nth-child(2n) {
   background-color: var(--bg-input);
+}
+
+/* ── Tree drag & drop (pointer-based) ── */
+/* While a tree drag is active, suppress text selection and show a grabbing cursor. */
+body.tree-dragging {
+  cursor: grabbing !important;
+  user-select: none;
+}
+body.tree-dragging * {
+  cursor: grabbing !important;
+}
+/* Floating ghost following the pointer. pointer-events:none so elementFromPoint
+   still hits the row beneath it for drop-target detection. */
+.dnd-ghost {
+  position: fixed;
+  top: 0;
+  left: 0;
+  transform: translate(-50%, -140%);
+  z-index: 9999;
+  pointer-events: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 220px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--text-primary);
+  background: var(--bg-sidebar);
+  border: 1px solid var(--accent);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
 }

@@ -4,13 +4,16 @@ import dayjs from 'dayjs'
 import Icon from '@/components/Icon.vue'
 import NoteTree from '@/components/NoteTree.vue'
 import { useNoteStore } from '@/stores/note'
+import { useCategoryStore } from '@/stores/category'
 import { useAuthStore } from '@/stores/auth'
 import { useTheme } from '@/composables/useTheme'
 import { useChatStore } from '@/stores/chat'
 import { deleteChatSession } from '@/api/ai'
 import { useToast } from '@/composables/useToast'
+import { useTreeDnd } from '@/composables/useTreeDnd'
+import type { DragPayload, DropTarget } from '@/composables/useTreeDnd'
 import { extractErrorMessage } from '@/api/client'
-import type { SnowflakeId } from '@/types'
+import type { NoteTreeItem, SnowflakeId } from '@/types'
 
 const props = defineProps<{
   selectedCategoryId: SnowflakeId | null
@@ -36,10 +39,12 @@ const emit = defineEmits<{
 }>()
 
 const noteStore = useNoteStore()
+const categoryStore = useCategoryStore()
 const authStore = useAuthStore()
 const { theme, toggle } = useTheme()
 const chatStore = useChatStore()
 const toast = useToast()
+const dnd = useTreeDnd()
 
 const chatSessions = computed(() => chatStore.sessions)
 
@@ -87,6 +92,41 @@ function formatDate(iso: string | null | undefined): string {
 
 const categories = () => noteStore.tree?.categories ?? []
 const uncategorized = () => noteStore.tree?.uncategorized ?? []
+
+// ── Drag & drop (pointer-based): single commit handler + ghost ──
+const dragging = computed(() => dnd.payload.value !== null)
+const rootZoneLabel = computed(() =>
+  dnd.payload.value?.type === 'category' ? '设为顶级分类' : '移到未分类',
+)
+const ghostLabel = computed(() => dnd.payload.value?.label ?? '')
+
+function onUncategorizedPointerDown(note: NoteTreeItem, e: PointerEvent) {
+  dnd.beginDrag(
+    { type: 'note', id: note.note_id, categoryId: note.category_id, label: note.note_title || '无标题' },
+    e,
+    categories(),
+  )
+}
+
+// Central commit: called by the composable on pointerup over a valid target.
+async function commit(p: DragPayload, target: DropTarget) {
+  const targetCatId = target === 'root' ? null : target
+  try {
+    if (p.type === 'note') {
+      if (p.categoryId === targetCatId) return // no-op
+      await noteStore.move([p.id], targetCatId)
+      toast.success(targetCatId ? '已移动到该分类' : '已移到未分类')
+    } else {
+      if (p.id === targetCatId) return // no-op
+      await categoryStore.safeUpdate(p.id, { parent_id: targetCatId })
+      await noteStore.refreshTree()
+      toast.success(targetCatId ? '已移动到该分类下' : '已设为顶级分类')
+    }
+  } catch (err) {
+    toast.error(err instanceof Error ? err.message : '移动失败')
+  }
+}
+dnd.onCommit(commit)
 </script>
 
 <template>
@@ -151,6 +191,17 @@ const uncategorized = () => noteStore.tree?.uncategorized ?? []
       </div>
 
       <template v-else-if="noteStore.tree">
+        <!-- Root drop zone: shown only while dragging a note/category -->
+        <div
+          v-if="dragging"
+          class="root-drop-zone"
+          :class="{ over: dnd.dropTarget.value === 'root' }"
+          data-drop-root
+        >
+          <Icon name="inbox" :size="14" class="row-icon" />
+          <span>{{ rootZoneLabel }}</span>
+        </div>
+
         <div v-if="!categories().length && !uncategorized().length" class="empty-hint">
           还没有笔记，点击上方“新建笔记”开始
         </div>
@@ -182,6 +233,7 @@ const uncategorized = () => noteStore.tree?.uncategorized ?? []
             :class="{ active: note.note_id === selectedNoteId }"
             :title="note.note_summary || note.note_preview || ''"
             @click="emit('select-note', note.note_id)"
+            @pointerdown="onUncategorizedPointerDown(note, $event)"
           >
             <Icon v-if="note.is_pinned" name="pin" :size="11" class="pin-icon" />
             <Icon v-else name="file-text" :size="13" class="note-icon" />
@@ -245,6 +297,21 @@ const uncategorized = () => noteStore.tree?.uncategorized ?? []
       </div>
     </div>
   </aside>
+
+  <!-- Floating drag ghost (teleported to body so it isn't clipped) -->
+  <Teleport to="body">
+    <div
+      v-if="dnd.dragPos.value"
+      class="dnd-ghost"
+      :style="{ left: dnd.dragPos.value.x + 'px', top: dnd.dragPos.value.y + 'px' }"
+    >
+      <Icon
+        :name="dnd.payload.value?.type === 'category' ? 'folder' : 'file-text'"
+        :size="13"
+      />
+      <span>{{ ghostLabel }}</span>
+    </div>
+  </Teleport>
 </template>
 
 <style scoped>
@@ -385,6 +452,26 @@ const uncategorized = () => noteStore.tree?.uncategorized ?? []
 /* Uncategorized group reuses the tree row styling. */
 .uncategorized-group {
   margin-top: 4px;
+}
+
+/* Root drop zone — appears only during a drag. */
+.root-drop-zone {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+  padding: 7px 10px;
+  border-radius: 6px;
+  border: 1px dashed var(--border);
+  color: var(--text-tertiary);
+  font-size: 12px;
+  background: var(--bg-input);
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+.root-drop-zone.over {
+  border-color: var(--accent);
+  color: var(--text-accent);
+  background: var(--bg-active);
 }
 .group-label {
   display: flex;
