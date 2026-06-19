@@ -37,11 +37,11 @@ class AiConfig(Base, TimestampMixin):
         nullable=False,
         comment="配置名",
     )
-    model_id: Mapped[int] = mapped_column(
+    model_id: Mapped[int | None] = mapped_column(
         BigInteger,
-        nullable=False,
+        nullable=True,
         index=True,
-        comment="引用模型池ID(应用层校验,无FK)",
+        comment="引用模型池ID(NULL=未绑定模型,应用层校验,无FK)",
     )
     system_prompt: Mapped[str | None] = mapped_column(
         Text,

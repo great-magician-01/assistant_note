@@ -12,6 +12,7 @@ from typing import Any, Optional
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.apps.ai.tools.registry import list_tools
 from backend.apps.model.ai_config import AiConfig
 from backend.apps.model.ai_model import AiModel
 from backend.apps.utils.exceptions import BusinessError, NotFoundError
@@ -33,7 +34,7 @@ async def list_ai_configs(db: AsyncSession) -> list[dict]:
 
     # Fetch referenced models (including soft-deleted ones, so a config that
     # points at a since-deleted model still shows what it referenced).
-    model_ids = {c.model_id for c in configs}
+    model_ids = {c.model_id for c in configs if c.model_id is not None}
     model_map = await _model_map(db, model_ids)
 
     logger.debug("List ai_configs: returned %d configs", len(configs))
@@ -55,7 +56,7 @@ async def get_ai_config(db: AsyncSession, config_id: int) -> Optional[dict]:
     config = result.scalar_one_or_none()
     if config is None:
         return None
-    model_map = await _model_map(db, {config.model_id})
+    model_map = await _model_map(db, {config.model_id} if config.model_id is not None else set())
     return _ai_config_to_dict(config, model_map.get(config.model_id))
 
 
@@ -75,8 +76,109 @@ async def get_default_config(db: AsyncSession) -> Optional[dict]:
     config = result.scalar_one_or_none()
     if config is None:
         return None
-    model_map = await _model_map(db, {config.model_id})
+    model_ids = {config.model_id} if config.model_id is not None else set()
+    model_map = await _model_map(db, model_ids)
     return _ai_config_to_dict(config, model_map.get(config.model_id))
+
+
+# ── Default config bootstrap ──────────────────────────────────────────────────
+
+# Fixed config_id so repeated startup doesn't create duplicate rows.
+DEFAULT_CONFIG_ID = 1
+
+DEFAULT_SYSTEM_PROMPT = """\
+你是「智能笔记」应用内置的 AI 助手，服务于当前登录用户。你可以帮用户搜索、阅读、整理和修改笔记，也可以新建笔记。
+
+## 可用工具
+- **search_notes(keyword)**: 按关键词全文搜索笔记（匹配标题和正文），返回摘要列表，不含正文。
+- **search_notes_by_tag(tag)**: 按标签筛选笔记，返回摘要列表。
+- **read_note(note_id)**: 读取指定笔记的完整内容（标题、正文 Markdown、摘要、标签）。修改笔记前必须先调用此工具确认当前内容。
+- **edit_note(note_id, fields...)**: 部分修改笔记，可改标题（note_title）、正文（note_content, Markdown）、摘要（note_summary）、标签（note_tags）。只传需要修改的字段，省略的字段保持不变。传正文时必须传完整的 Markdown 全文，不要只传片段。
+- **create_note(note_title, fields...)**: 新建笔记，可指定标题、正文（note_content, Markdown）、分类（category_id）、标签（note_tags）。
+
+## 工作流程
+1. **修改笔记**: 先用 search_notes 找到目标 → 用 read_note 读取完整内容 → 确认后再用 edit_note 修改。
+2. **新建笔记**: 从用户意图中提炼标题和正文，用 create_note 创建。
+3. **不确定性**: 当用户意图不明确（指代不明、信息不足）时，先向用户确认，不要猜测后擅自操作。
+4. **批量操作**: 一次回复中可以连续调用多个工具（如先搜索→读取→再编辑）。
+
+## 注意事项
+- 所有 note_id / category_id 都是字符串形式的雪花ID，从工具返回后原样传入即可。
+- 没有删除笔记的功能（设计如此），如需"删除"某内容可清空正文或标记标签。
+- 工具返回错误时（如笔记不存在），如实告知用户并给出建议，不要假装成功。
+- 完成操作后用简短中文告知结果，无需复述整段正文（除非用户要求）。\
+"""
+
+
+async def ensure_default_config(
+    db: AsyncSession, *, model_id: int | None = None, max_tokens: int | None = None
+) -> None:
+    """Ensure the default AI config row (config_id=1) exists.
+
+    Called when the first model is added to the pool.  Uses a fixed
+    ``config_id`` so repeated calls are idempotent.  If the config already
+    exists its model/settings are left untouched — only the tool list is
+    refreshed so newly registered tools become available.
+
+    Parameters:
+        model_id:  Pool model to bind (used only on first creation).
+        max_tokens:  Max tokens for the config (derived from the model).
+    """
+    result = await db.execute(
+        select(AiConfig).where(AiConfig.config_id == DEFAULT_CONFIG_ID)
+    )
+    config = result.scalar_one_or_none()
+
+    all_tool_names = [t.name for t in list_tools()]
+
+    if config is None:
+        if model_id is None:
+            logger.warning("Default AI config not created: no model_id provided")
+            return
+        logger.info("Creating default AI config bound to model_id=%s", model_id)
+        config = AiConfig(
+            config_id=DEFAULT_CONFIG_ID,
+            config_name="默认助手",
+            model_id=model_id,
+            max_tokens=max_tokens,
+            system_prompt=DEFAULT_SYSTEM_PROMPT,
+            tools=all_tool_names,
+            is_default=1,
+            is_active=1,
+        )
+        db.add(config)
+        await db.flush()
+        logger.info("Default AI config created: config_id=%s, model_id=%s, tools=%d",
+                     config.config_id, model_id, len(all_tool_names))
+        return
+
+    # Config already exists — resurrect if soft-deleted/disabled and refresh
+    # tools.  Never overwrite model_id / system_prompt / sampling params —
+    # those belong to the admin.
+    updated = False
+
+    if config.is_deleted != 0:
+        config.is_deleted = 0
+        updated = True
+        logger.info("Default AI config was soft-deleted; restoring")
+
+    if config.is_active != 1:
+        config.is_active = 1
+        updated = True
+        logger.info("Default AI config re-activated")
+
+    existing_tools: set[str] = set(config.tools or [])
+    new_tools = [t for t in all_tool_names if t not in existing_tools]
+    if new_tools:
+        config.tools = list(existing_tools | set(all_tool_names))
+        updated = True
+        logger.info("Default AI config tools refreshed: added %s", new_tools)
+
+    if updated:
+        await db.flush()
+        logger.info("Default AI config repaired: config_id=%s", config.config_id)
+    else:
+        logger.debug("Default AI config already healthy (config_id=%s)", config.config_id)
 
 
 async def create_ai_config(db: AsyncSession, fields: dict[str, Any]) -> AiConfig:
@@ -85,8 +187,9 @@ async def create_ai_config(db: AsyncSession, fields: dict[str, Any]) -> AiConfig
     Raises NotFoundError if the referenced model does not exist,
     BusinessError on invalid sampling params.
     """
-    model_id = fields["model_id"]
-    await _validate_model(db, model_id)
+    model_id = fields.get("model_id")
+    if model_id is not None:
+        await _validate_model(db, model_id)
     _validate_sampling(fields)
 
     is_default = fields.get("is_default", 0)
@@ -135,7 +238,8 @@ async def update_ai_config(
         raise NotFoundError("配置不存在")
 
     if "model_id" in fields:
-        await _validate_model(db, fields["model_id"])
+        if fields["model_id"] is not None:
+            await _validate_model(db, fields["model_id"])
         config.model_id = fields["model_id"]
 
     _validate_sampling(fields)

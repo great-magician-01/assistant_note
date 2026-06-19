@@ -3,7 +3,7 @@
 import logging
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.apps.model.ai_config import AiConfig
@@ -54,6 +54,19 @@ async def create_ai_model(db: AsyncSession, fields: dict[str, Any]) -> AiModel:
     )
     db.add(model)
     await db.flush()
+
+    # When the first model enters the pool, auto-create the default AI config
+    # bound to it.  Idempotent: if the config already exists the call only
+    # refreshes the tool list.
+    model_count = await db.scalar(
+        select(func.count(AiModel.model_id)).where(AiModel.is_deleted == 0)
+    )
+    if model_count == 1:
+        from backend.apps.service import ai_config_service
+        await ai_config_service.ensure_default_config(
+            db, model_id=model.model_id, max_tokens=model.max_tokens
+        )
+
     logger.info("Create ai_model success: model_id=%s, name=%s", model.model_id, model.name)
     return model
 

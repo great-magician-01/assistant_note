@@ -208,6 +208,8 @@ async def resolve_chat_config(
         raise BusinessError("该 AI 配置已禁用")
 
     model_id = config["model_id"]
+    if model_id is None:
+        raise BusinessError("默认配置尚未绑定 AI 模型，请先在「模型管理」中添加模型并关联到此配置")
     result = await db.execute(
         select(AiModel).where(AiModel.model_id == model_id)
     )
