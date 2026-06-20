@@ -125,11 +125,12 @@ async function send() {
   bubbles.value.push({ role: 'user', text, tools: [] })
   input.value = ''
   chatStore.sending = true
-  const aiBubble: Bubble = { role: 'ai', text: '', tools: [] }
-  bubbles.value.push(aiBubble)
+  // Push the ai bubble and immediately grab the reactive proxy from the
+  // array — the local variable must reference the proxy for mutations in
+  // onText / onToolStart / onToolEnd to trigger Vue reactivity.
+  bubbles.value.push({ role: 'ai', text: '', tools: [] })
+  const aiBubble = bubbles.value[bubbles.value.length - 1]
   await scrollToBottom()
-
-  const toolIndex = new Map<string, ToolChip>()
 
   try {
     await streamChat(
@@ -147,12 +148,14 @@ async function send() {
           void scrollToBottom()
         },
         onToolStart: (data) => {
-          const chip: ToolChip = { id: data.id, name: data.name, pending: true }
-          toolIndex.set(data.id, chip)
-          aiBubble.tools.push(chip)
+          // Pushed into the reactive array (aiBubble.tools) so the chip
+          // proxy is tracked by Vue — use find() in onToolEnd to mutate
+          // through the proxy.
+          aiBubble.tools.push({ id: data.id, name: data.name, pending: true })
         },
         onToolEnd: (data) => {
-          const chip = toolIndex.get(data.id)
+          // Find through the reactive array to mutate via the Vue proxy.
+          const chip = aiBubble.tools.find(c => c.id === data.id)
           if (chip) {
             chip.result = data.result
             chip.isError = data.is_error
