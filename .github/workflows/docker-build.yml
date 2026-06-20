@@ -1,0 +1,62 @@
+name: Build Docker Image
+
+on:
+  push:
+    branches:
+      - master
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve image tag
+        id: meta
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            # strip leading 'v' from tags like v1.2.3 -> 1.2.3
+            ver="${GITHUB_REF_NAME#v}"
+            echo "tag=${ver}" >> "$GITHUB_OUTPUT"
+            echo "name=assistant-note-${ver}" >> "$GITHUB_OUTPUT"
+          else
+            sha="${GITHUB_SHA::7}"
+            echo "tag=${sha}" >> "$GITHUB_OUTPUT"
+            echo "name=assistant-note-${sha}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image (load into docker)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          tags: assistant-note:${{ steps.meta.outputs.tag }}
+          load: true
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Save image as .tar (uncompressed)
+        run: |
+          mkdir -p artifacts
+          docker save assistant-note:${{ steps.meta.outputs.tag }} \
+            -o "artifacts/${{ steps.meta.outputs.name }}.tar"
+          # Sanity check: confirm it is an uncompressed tar (not gzip).
+          file "artifacts/${{ steps.meta.outputs.name }}.tar"
+
+      - name: Upload .tar artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.meta.outputs.name }}
+          path: artifacts/*.tar
+          if-no-files-found: error
+          retention-days: 30

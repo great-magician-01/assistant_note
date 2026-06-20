@@ -1,0 +1,50 @@
+# Version control
+.git
+.gitignore
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node / frontend build artefacts (rebuilt inside the image)
+frontend/node_modules/
+frontend/dist/
+node_modules/
+.vite/
+
+# Runtime data (must not be baked into the image)
+pylogs/
+*.log
+uploads/
+cache/
+
+# Local config / secrets
+.env
+.env.*
+!.env.example
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Repo noise
+*.tmp
+*.bak
+docs/
+README.md
+CLAUDE.md
+.review_diff.txt
+frontend_diff.txt
+
+# *.txt would also drop requirements.txt — keep that one.
+*.txt
+!requirements.txt

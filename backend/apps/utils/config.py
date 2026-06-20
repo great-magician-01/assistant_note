@@ -31,6 +31,10 @@ class Settings(BaseSettings):
     # Server
     BACKEND_SERVER_PORT: int = 6581
     FRONTEND_SERVER_PORT: int = 6580
+    # Path to the built frontend (vite `dist/`). When set, the backend serves
+    # the SPA + its static assets itself — used by the single-image Docker
+    # deploy. Empty in local dev (the separate vite dev server is used).
+    FRONTEND_DIST: str = ""
 
     # CORS
     CORS_ALLOW_ORIGINS: str = "*"

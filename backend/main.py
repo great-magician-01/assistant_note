@@ -156,3 +156,36 @@ app.mount(
 @app.get("/health", tags=["Health"])
 async def health_check():
     return {"status": "ok"}
+
+
+# Serve the built frontend for the single-image Docker deploy. Only mounted
+# when FRONTEND_DIST points at the vite build output; local dev keeps using the
+# separate vite dev server on :6580. Mounted AFTER /api routes and /uploads so
+# those take precedence; a catch-all falls back to index.html for client-side
+# routing (Vue history mode).
+_frontend_dist = settings.FRONTEND_DIST
+if _frontend_dist and os.path.isdir(_frontend_dist):
+    from fastapi.responses import FileResponse
+
+    _frontend_root = os.path.abspath(_frontend_dist)
+
+    def _mount_static(prefix: str, sub: str) -> None:
+        directory = os.path.join(_frontend_root, sub)
+        if os.path.isdir(directory):
+            app.mount(prefix, StaticFiles(directory=directory), name=f"frontend-{sub}")
+
+    _mount_static("/assets", "assets")
+    _mount_static("/vditor", "vditor")
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def _spa_fallback(full_path: str):
+        # Serve an exact file if it exists under the build dir (path-traversal
+        # guarded); otherwise return index.html so client-side routes resolve.
+        candidate = os.path.normpath(os.path.join(_frontend_root, full_path))
+        if (
+            full_path
+            and candidate.startswith(_frontend_root + os.sep)
+            and os.path.isfile(candidate)
+        ):
+            return FileResponse(candidate)
+        return FileResponse(os.path.join(_frontend_root, "index.html"))
